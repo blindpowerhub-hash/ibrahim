@@ -64,15 +64,66 @@ local FIREBASE_URL = "https://ibrahim-6e4a3-default-rtdb.firebaseio.com/"
 local CURRENT_VERSION = "1.0"
 local VERSION_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/virgin.txt"
 local UPDATE_CODE_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/main.lua"
-local PLUGIN_PATH = (function()
-  local ok, info = pcall(debug.getinfo, 1, "S")
-  if ok and info and info.source then
-    local p = tostring(info.source):match("^@?(.*)$") or ""
-    if p ~= "" then return p end
+
+local SOUND_BASE_DIR = "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub. /allopensourcebyblindTechpowerhub/"
+
+local function resolveTargetPluginPath()
+  local detected = ""
+  pcall(function()
+    local info = debug.getinfo(1, "S")
+    if info and info.source then
+      local src = tostring(info.source)
+      if src:sub(1, 1) == "@" then
+        detected = src:sub(2)
+      elseif src:sub(1, 1) == "/" then
+        detected = src
+      end
+    end
+  end)
+
+  if detected ~= "" and detected:sub(-4):lower() == ".lua" then
+    local f = File(detected)
+    if f.exists() and f.canWrite() then
+      return detected
+    end
   end
-  local ok2, dir = pcall(function() return activity.getFilesDir().getAbsolutePath() end)
-  return (ok2 and dir and (dir .. "/main.lua")) or "/storage/emulated/0/main.lua"
-end)()
+
+  local candidate_paths = {
+    SOUND_BASE_DIR .. "main.lua",
+    "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub. /main.lua",
+    "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub/main.lua"
+  }
+  for _, cp in ipairs(candidate_paths) do
+    local cf = File(cp)
+    if cf.exists() then
+      return cp
+    end
+  end
+
+  local base_dir_file = File(SOUND_BASE_DIR)
+  if base_dir_file.exists() and base_dir_file.isDirectory() then
+    local files_arr = base_dir_file.listFiles()
+    if files_arr ~= nil then
+      for i = 0, files_arr.length - 1 do
+        local item_f = files_arr[i]
+        if item_f ~= nil and item_f.isFile() then
+          local fname = tostring(item_f.getName())
+          if fname:sub(-4):lower() == ".lua" and not fname:find("temp_update", 1, true) then
+            return tostring(item_f.getAbsolutePath())
+          end
+        end
+      end
+    end
+  end
+
+  local ok_dir, app_dir = pcall(function() return tostring(activity.getFilesDir().getAbsolutePath()) end)
+  if ok_dir and app_dir and app_dir ~= "" then
+    return app_dir .. "/main.lua"
+  end
+  return SOUND_BASE_DIR .. "main.lua"
+end
+
+local PLUGIN_PATH = resolveTargetPluginPath()
 local updateInProgress = false
 
 local MAX_VOICE_SECONDS = 45
@@ -135,7 +186,6 @@ local current_voice_playlist_index = -1
 -- SOUND PATHS & ENCRYPTION-SAFE MEDIA / TONE HELPERS
 -- ========================================================
 
-local SOUND_BASE_DIR = "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub. /allopensourcebyblindTechpowerhub/"
 local SOUND_NOTIF = SOUND_BASE_DIR .. "win.ogg"
 local SOUND_SEND = SOUND_BASE_DIR .. "send.mp3"
 local SOUND_RECEIVE = SOUND_BASE_DIR .. "receive.mp3"
@@ -313,7 +363,7 @@ local function showOfflineCallDialog(target_label)
 end
 
 -- ========================================================
--- AUTO UPDATE SYSTEM (VERSION 1.0 + MANUAL CHECK + RELOAD)
+-- AUTO UPDATE SYSTEM (JAVA FILE STREAM + SAFE FALLBACK + CLEAN RELOAD)
 -- ========================================================
 
 local function playUpdateAlertCue()
@@ -333,135 +383,116 @@ end
 local function showUpdateErrorDialog(title, message)
   Handler(Looper.getMainLooper()).post(Runnable({
     run = function()
-      local errorDialog = LuaDialog(activity)
-      errorDialog.setTitle(title)
-      errorDialog.setMessage(message)
-      errorDialog.setButton("OK", function()
-        errorDialog.dismiss()
-      end)
-      errorDialog.show()
+      AlertDialog.Builder(activity)
+        .setTitle(title)
+        .setMessage(message)
+        .setPositiveButton("OK", nil)
+        .show()
     end
   }))
 end
 
+local function writeTextFileSafely(target_path, content_str)
+  local target_file = File(target_path)
+  local parent_dir = target_file.getParentFile()
+  if parent_dir ~= nil and not parent_dir.exists() then
+    pcall(function() parent_dir.mkdirs() end)
+  end
+
+  local temp_file = File(target_path .. ".temp_update")
+  local ok_temp, err_temp = pcall(function()
+    local jstr = String(tostring(content_str))
+    local bytes = jstr.getBytes("UTF-8")
+    local fos = FileOutputStream(temp_file, false)
+    fos.write(bytes)
+    fos.flush()
+    fos.close()
+  end)
+
+  if ok_temp and temp_file.exists() and temp_file.length() > 50 then
+    if target_file.exists() then
+      pcall(function() target_file.delete() end)
+    end
+    local renamed = false
+    pcall(function()
+      renamed = temp_file.renameTo(target_file)
+    end)
+    if renamed and target_file.exists() and target_file.length() > 50 then
+      return true, ""
+    end
+    pcall(function() temp_file.delete() end)
+  else
+    pcall(function() if temp_file.exists() then temp_file.delete() end end)
+  end
+
+  -- Direct overwrite fallback if rename is blocked by folder permissions
+  local ok_direct, err_direct = pcall(function()
+    local jstr = String(tostring(content_str))
+    local bytes = jstr.getBytes("UTF-8")
+    local fos = FileOutputStream(target_file, false)
+    fos.write(bytes)
+    fos.flush()
+    fos.close()
+  end)
+
+  if ok_direct and target_file.exists() and target_file.length() > 50 then
+    return true, ""
+  end
+
+  return false, tostring(err_direct or err_temp or "Storage write permission denied")
+end
+
 local function performUpdate(mainCode, onlineVersion)
   if not mainCode or trim(mainCode) == "" then
-    showUpdateErrorDialog("Update Failed", "Main plugin code is empty.")
+    showUpdateErrorDialog("Update Failed", "Downloaded update code is empty.")
     return
   end
 
   updateInProgress = true
+  PLUGIN_PATH = resolveTargetPluginPath()
 
-  local function updateProcess()
-    local currentFileSrc = ""
-    pcall(function()
-      local info = debug.getinfo(1, "S")
-      if info and info.source then
-        currentFileSrc = tostring(info.source):match("^@?(.*)$") or ""
-      end
-    end)
-
-    if currentFileSrc ~= "" and currentFileSrc ~= PLUGIN_PATH then
-      pcall(function()
-        os.rename(currentFileSrc, PLUGIN_PATH)
-      end)
-    end
-
-    local success = false
-    local tempPath = PLUGIN_PATH .. ".temp_update"
-    local f = io.open(tempPath, "w")
-    if f then
-      f:write(mainCode)
-      f:close()
-
-      local fileExists = io.open(PLUGIN_PATH, "r")
-      if fileExists then
-        fileExists:close()
-        local delSuccess = pcall(function()
-          os.remove(PLUGIN_PATH)
-        end)
-        if delSuccess then
-          local renameSuccess = pcall(function()
-            os.rename(tempPath, PLUGIN_PATH)
-          end)
-          if renameSuccess then
-            success = true
-          end
-        end
-      else
-        local renameSuccess = pcall(function()
-          os.rename(tempPath, PLUGIN_PATH)
-        end)
-        if renameSuccess then
-          success = true
-        end
-      end
-
-      if not success then
-        pcall(function() os.remove(tempPath) end)
-      end
-    end
-
-    if success then
+  Handler(Looper.getMainLooper()).post(Runnable({
+    run = function()
+      local written_ok, write_err = writeTextFileSafely(PLUGIN_PATH, mainCode)
       updateInProgress = false
-      Handler(Looper.getMainLooper()).post(Runnable({
-        run = function()
-          playUpdateAlertCue()
-          local successDialog = LuaDialog(activity)
-          successDialog.setTitle("Update Successful")
-          successDialog.setMessage("Successfully updated to version " .. tostring(onlineVersion or "") .. ".\n\nClick OK to restart and apply the update.")
-          successDialog.setButton("OK", function()
-            successDialog.dismiss()
 
-            Handler(Looper.getMainLooper()).post(Runnable({
-              run = function()
-                pcall(function() if _G.mainDialog then _G.mainDialog.dismiss() _G.mainDialog = nil end end)
-                pcall(function() if _G.mainDlg then _G.mainDlg.dismiss() _G.mainDlg = nil end end)
-                pcall(function() if _G.allDialogBox then _G.allDialogBox.dismiss() _G.allDialogBox = nil end end)
-                pcall(function() if _G.alertDialogBox then _G.alertDialogBox.dismiss() _G.alertDialogBox = nil end end)
-                pcall(function() if _G.dismissAllDialogs then _G.dismissAllDialogs() end end)
-                pcall(function() if _G.dismissAll then _G.dismissAll() end end)
-                pcall(function() if _G.dismiss then _G.dismiss() end end)
-                pcall(function() if dismissAllDialogs then dismissAllDialogs() end end)
-                pcall(function() if dismissAll then dismissAll() end end)
-                pcall(function()
-                  if activity then
-                    activity.finish()
-                  end
-                end)
-              end
-            }))
+      if written_ok then
+        playUpdateAlertCue()
+        AlertDialog.Builder(activity)
+          .setTitle("Update Successful")
+          .setMessage("Successfully updated to version " .. tostring(onlineVersion or "") .. ".\n\nClick OK to restart and apply the update.")
+          .setCancelable(false)
+          .setPositiveButton("OK", DialogInterface.OnClickListener{
+            onClick = function()
+              update_prefs.edit().putString("lastShownVersion", tostring(onlineVersion or "")).apply()
+              pcall(function() stopActiveVoicePlayer(false) end)
+              pcall(function() stopBackgroundNotificationWatcher() end)
+              pcall(function() if _G.mainDialog then _G.mainDialog.dismiss() _G.mainDialog = nil end end)
+              pcall(function() if _G.mainDlg then _G.mainDlg.dismiss() _G.mainDlg = nil end end)
+              pcall(function() if _G.allDialogBox then _G.allDialogBox.dismiss() _G.allDialogBox = nil end end)
+              pcall(function() if _G.alertDialogBox then _G.alertDialogBox.dismiss() _G.alertDialogBox = nil end end)
 
-            Handler(Looper.getMainLooper()).postDelayed(Runnable({
-              run = function()
-                update_prefs.edit().putString("lastShownVersion", "").apply()
-                local pluginFile = io.open(PLUGIN_PATH, "r")
-                if pluginFile then
-                  pluginFile:close()
-                  local func, err = loadfile(PLUGIN_PATH)
-                  if func then
-                    pcall(func)
-                  else
-                    Toast.makeText(activity, "Error reloading code: " .. tostring(err), Toast.LENGTH_SHORT).show()
-                  end
+              local func, err = loadfile(PLUGIN_PATH)
+              if func then
+                local run_ok, run_err = pcall(func)
+                if not run_ok then
+                  showToast("Restarting app to apply update...")
+                  pcall(function() activity.recreate() end)
                 end
+              else
+                showToast("Reload error: " .. tostring(err))
               end
-            }), 2000)
-          end)
-          successDialog.show()
-        end
-      }))
-      return
-    else
-      updateInProgress = false
-      showUpdateErrorDialog("Update Failed", "Update failed. Please try again.")
+            end
+          })
+          .show()
+      else
+        showUpdateErrorDialog(
+          "Update Failed",
+          "Could not save update file.\nPath: " .. tostring(PLUGIN_PATH) .. "\nReason: " .. tostring(write_err)
+        )
+      end
     end
-  end
-
-  local updateThread = Thread(Runnable{
-    run = updateProcess
-  })
-  updateThread.start()
+  }))
 end
 
 function checkUpdate(manualCheck)
@@ -470,43 +501,50 @@ function checkUpdate(manualCheck)
     return
   end
 
+  if not isNetworkAvailable() then
+    if manualCheck then
+      showUpdateErrorDialog("No Internet", "Please connect to the internet and try again.")
+    end
+    return
+  end
+
   if manualCheck then
     showToast("Checking for updates...")
   end
 
   local timestamp = tostring(System.currentTimeMillis())
-  Http.get(VERSION_URL .. "?t=" .. timestamp, function(code, response)
+  Http.get(VERSION_URL .. "?t=" .. timestamp, nil, "utf-8", nil, function(code, response)
     if code == 200 and response then
       local onlineVersion = trim(response)
       if onlineVersion ~= "" and onlineVersion ~= CURRENT_VERSION then
-        Http.get(UPDATE_CODE_URL .. "?t=" .. timestamp, function(code2, mainCode)
+        Http.get(UPDATE_CODE_URL .. "?t=" .. timestamp, nil, "utf-8", nil, function(code2, mainCode)
           if code2 == 200 and mainCode and trim(mainCode) ~= "" then
             Handler(Looper.getMainLooper()).post(Runnable({
               run = function()
                 playUpdateAlertCue()
-                local updateAlertDlg = LuaDialog(activity)
-                updateAlertDlg.setTitle("Update Available!")
-                updateAlertDlg.setMessage("A new version (" .. onlineVersion .. ") is available.\nCurrent version: " .. CURRENT_VERSION .. "\n\nWould you like to update now?")
-                updateAlertDlg.setButton("Update Now", function()
-                  updateAlertDlg.dismiss()
-                  Toast.makeText(activity, "Downloading update...", Toast.LENGTH_SHORT).show()
-                  performUpdate(mainCode, onlineVersion)
-                end)
-                updateAlertDlg.setButton2("Later", function()
-                  updateAlertDlg.dismiss()
-                end)
-                updateAlertDlg.show()
+                AlertDialog.Builder(activity)
+                  .setTitle("Update Available!")
+                  .setMessage("A new version (" .. onlineVersion .. ") is available.\nCurrent version: " .. CURRENT_VERSION .. "\n\nWould you like to update now?")
+                  .setCancelable(false)
+                  .setPositiveButton("Update Now", DialogInterface.OnClickListener{
+                    onClick = function()
+                      showToast("Downloading update...")
+                      performUpdate(mainCode, onlineVersion)
+                    end
+                  })
+                  .setNegativeButton("Later", nil)
+                  .show()
               end
             }))
           elseif manualCheck then
-            showUpdateErrorDialog("Update Check Failed", "Could not download the latest code from server.")
+            showUpdateErrorDialog("Update Check Failed", "Could not download main.lua (HTTP " .. tostring(code2) .. ").")
           end
         end)
       elseif manualCheck then
         showMessage("Up to Date", "You are already using the latest version (" .. CURRENT_VERSION .. ").")
       end
     elseif manualCheck then
-      showUpdateErrorDialog("Update Check Failed", "Unable to reach version server. Check your internet connection.")
+      showUpdateErrorDialog("Update Check Failed", "Unable to reach version server (HTTP " .. tostring(code) .. ").")
     end
   end)
 end
@@ -709,7 +747,7 @@ local function applyPlayerSpeed(mp, speed_val)
   end)
 end
 
-local function stopActiveVoicePlayer(keep_queue)
+function stopActiveVoicePlayer(keep_queue)
   if voice_progress_runnable ~= nil then
     pcall(function() voice_progress_handler.removeCallbacks(voice_progress_runnable) end)
     voice_progress_runnable = nil
@@ -1206,6 +1244,7 @@ local function updatePresence(status_str)
   if not share_presence then return end
 
   local presence_data = {
+    username = current_username,
     status = status_str or "online",
     last_seen = os.date("%I:%M %p, %d %b"),
     time_epoch = os.time()
@@ -1741,7 +1780,6 @@ local function startIncomingCallWatcher()
   incoming_call_runnable = Runnable({
     run = function()
       if current_username ~= "" and active_call_dialog == nil and isNetworkAvailable() then
-        -- Public Room Live Voice Chat Notification for all users
         http_get(FIREBASE_URL .. "settings/room_live_voice.json", function(s_lv, r_lv)
           if s_lv and r_lv and r_lv ~= "null" and active_call_dialog == nil then
             local ok_lv, lv_data = pcall(cjson.decode, r_lv)
@@ -2969,7 +3007,7 @@ end
 -- NOTIFICATIONS & LIKE SOUND WATCHER
 -- ========================================================
 
-local function stopBackgroundNotificationWatcher()
+function stopBackgroundNotificationWatcher()
   if bg_notif_handler ~= nil and bg_notif_runnable ~= nil then
     pcall(function()
       bg_notif_handler.removeCallbacks(bg_notif_runnable)
@@ -5928,7 +5966,6 @@ function showResourceChatDialog()
 
           local online_total, online_names_str = getOnlineUsersSummary(s_pres and r_pres or nil)
 
-          -- 1. Pinned Top Card: BTP Voice Room
           local voice_room_card = makeLayout(true, 12)
           voice_room_card.setBackgroundColor(0xFFE3F2FD)
           local vr_title_str = "BTP Voice Room (" .. tostring(online_total) .. " online • " .. online_names_str .. ")"
@@ -5948,7 +5985,6 @@ function showResourceChatDialog()
             openBtpVoiceRoomDialog()
           end)
 
-          -- 2. Pinned Second Card: View Groups
           local groups_card = makeLayout(true, 12)
           groups_card.setBackgroundColor(0xFFE8F5E9)
           local grp_title = makeText("View Groups", 16)
@@ -5961,7 +5997,6 @@ function showResourceChatDialog()
             showGroupsListDialog()
           end)
 
-          -- 3. Personal Direct Chats List
           local user_map = {}
           local user_last_msg_time = {}
           local user_last_msg_data = {}
