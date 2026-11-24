@@ -119,7 +119,9 @@ local function resolveTargetPluginPath()
   if base_dir_file.exists() and base_dir_file.isDirectory() then
     local files_arr = base_dir_file.listFiles()
     if files_arr ~= nil then
-      for i = 0, files_arr.length - 1 do
+      local arr_len = 0
+      pcall(function() arr_len = Array.getLength(files_arr) end)
+      for i = 0, arr_len - 1 do
         local item_f = files_arr[i]
         if item_f ~= nil and item_f.isFile() then
           local fname = tostring(item_f.getName())
@@ -379,6 +381,23 @@ end
 -- AUTO UPDATE SYSTEM (PLAIN & ENCRYPTED LUA + WHAT'S NEW NOTE.TXT)
 -- ========================================================
 
+local function getJavaByteArrayLen(byteArr)
+  if byteArr == nil then return 0 end
+  local ok, len = pcall(function()
+    return Array.getLength(byteArr)
+  end)
+  if ok and type(len) == "number" then
+    return len
+  end
+  local ok2, len2 = pcall(function()
+    return #byteArr
+  end)
+  if ok2 and type(len2) == "number" then
+    return len2
+  end
+  return 0
+end
+
 local function playUpdateAlertCue()
   pcall(function()
     playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_ACK, false)
@@ -451,10 +470,20 @@ local function writeRawBytesSafely(target_path, rawBytes)
 end
 
 local function isEncryptedOrBytecodeBytes(rawBytes)
-  if rawBytes == nil or rawBytes.length < 4 then return false end
-  local b0 = rawBytes[0]
-  if b0 == 27 or b0 < 0 then
-    return true
+  local len = getJavaByteArrayLen(rawBytes)
+  if len < 4 then return false end
+  local ok, b0 = pcall(function()
+    return rawBytes[0]
+  end)
+  if not ok or b0 == nil then
+    ok, b0 = pcall(function()
+      return Array.getByte(rawBytes, 0)
+    end)
+  end
+  if ok and type(b0) == "number" then
+    if b0 == 27 or b0 < 0 then
+      return true
+    end
   end
   return false
 end
@@ -478,7 +507,7 @@ local function performUpdate(onlineVersion)
   local dlUrl = UPDATE_CODE_URL .. "?t=" .. tostring(System.currentTimeMillis())
 
   _G.BtpBinaryUpdateCallbacks[tId] = function(dlOk, verStr, rawBytes)
-    if not dlOk or rawBytes == nil then
+    if not dlOk or rawBytes == nil or getJavaByteArrayLen(rawBytes) <= 50 then
       updateInProgress = false
       showUpdateErrorDialog("Update Failed", "Could not download main.lua from server.")
       return
@@ -551,6 +580,7 @@ local function performUpdate(onlineVersion)
     require "import"
     import "java.net.*"
     import "java.io.*"
+    import "java.lang.reflect.Array"
 
     local ok, byteArr = pcall(function()
       local u = URL(urlStr)
@@ -576,7 +606,19 @@ local function performUpdate(onlineVersion)
       return res
     end)
 
-    local success = (ok and byteArr ~= nil and byteArr.length > 50)
+    local byteLen = 0
+    if ok and byteArr ~= nil then
+      pcall(function()
+        byteLen = Array.getLength(byteArr)
+      end)
+      if byteLen == 0 then
+        pcall(function()
+          byteLen = #byteArr
+        end)
+      end
+    end
+
+    local success = (ok and byteArr ~= nil and byteLen > 50)
     call("onBtpBinaryUpdateDownloaded", tid, success, ver, byteArr)
   end, tId, dlUrl, onlineVersion)
 end
