@@ -61,11 +61,25 @@ local APP_TITLE = "all open source by blind Tech power hub"
 local APP_DEV = "Developer: Ibrahim Ansari"
 local FIREBASE_URL = "https://ibrahim-6e4a3-default-rtdb.firebaseio.com/"
 
-local CURRENT_VERSION = "1.0"
+local DEFAULT_VERSION = "1.31.2"
 local VERSION_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/virgin.txt"
 local UPDATE_CODE_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/main.lua"
 
 local SOUND_BASE_DIR = "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub. /allopensourcebyblindTechpowerhub/"
+
+local sp = activity.getSharedPreferences("BTP_USER_PREFS", Context.MODE_PRIVATE)
+local update_prefs = activity.getSharedPreferences("AutoUpdatePrefs", Context.MODE_PRIVATE)
+local current_username = tostring(sp.getString("username", ""))
+
+local function getCurrentAppVersion()
+  local saved_v = tostring(update_prefs.getString("installed_app_version", ""))
+  if saved_v ~= "" then
+    return saved_v
+  end
+  return DEFAULT_VERSION
+end
+
+local CURRENT_VERSION = getCurrentAppVersion()
 
 local function resolveTargetPluginPath()
   local detected = ""
@@ -125,16 +139,15 @@ end
 
 local PLUGIN_PATH = resolveTargetPluginPath()
 local updateInProgress = false
+local updateDialogShowing = false
+local updateDismissedThisSession = false
+local isAppForeground = true
 
 local MAX_VOICE_SECONDS = 45
 local CHAT_POLL_INTERVAL_MS = 8000
 local ROOM_POLL_INTERVAL_MS = 8000
-local CALL_POLL_INTERVAL_MS = 2500
+local CALL_POLL_INTERVAL_MS = 3000
 local CALL_RING_TIMEOUT_SEC = 35
-
-local sp = activity.getSharedPreferences("BTP_USER_PREFS", Context.MODE_PRIVATE)
-local update_prefs = activity.getSharedPreferences("AutoUpdatePrefs", Context.MODE_PRIVATE)
-local current_username = tostring(sp.getString("username", ""))
 
 local all_codes_data = {}
 local main_content
@@ -183,7 +196,7 @@ local current_voice_playlist = {}
 local current_voice_playlist_index = -1
 
 -- ========================================================
--- SOUND PATHS & ENCRYPTION-SAFE MEDIA / TONE HELPERS
+-- SOUND PATHS & MEDIA / TONE HELPERS
 -- ========================================================
 
 local SOUND_NOTIF = SOUND_BASE_DIR .. "win.ogg"
@@ -197,7 +210,6 @@ local SOUND_VOICE_NEXT = SOUND_BASE_DIR .. "display_connected.mid"
 local SOUND_CODE_HIT = "/storage/emulated/0/Download/btp_click.mp3"
 local SOUND_SUCCESS = SOUND_BASE_DIR .. "win.ogg"
 
--- New & Requested Call / Voice / Alert Sounds
 local SOUND_VOICE_PRE_SEND = SOUND_BASE_DIR .. "kv7.m4a"
 local SOUND_CALL_CONNECTED = SOUND_BASE_DIR .. "ktf.m4a"
 local SOUND_GROUP_CALL_RING = SOUND_BASE_DIR .. "kub.ogg"
@@ -309,7 +321,7 @@ local function trim(s)
 end
 
 -- ========================================================
--- CORE UI BUILDERS (DEFINED FIRST TO PREVENT NIL ERRORS)
+-- CORE UI BUILDERS
 -- ========================================================
 
 function table_size(t)
@@ -363,7 +375,7 @@ local function showOfflineCallDialog(target_label)
 end
 
 -- ========================================================
--- AUTO UPDATE SYSTEM (JAVA FILE STREAM + SAFE FALLBACK + CLEAN RELOAD)
+-- AUTO UPDATE SYSTEM
 -- ========================================================
 
 local function playUpdateAlertCue()
@@ -425,7 +437,6 @@ local function writeTextFileSafely(target_path, content_str)
     pcall(function() if temp_file.exists() then temp_file.delete() end end)
   end
 
-  -- Direct overwrite fallback if rename is blocked by folder permissions
   local ok_direct, err_direct = pcall(function()
     local jstr = String(tostring(content_str))
     local bytes = jstr.getBytes("UTF-8")
@@ -453,20 +464,36 @@ local function performUpdate(mainCode, onlineVersion)
 
   Handler(Looper.getMainLooper()).post(Runnable({
     run = function()
-      local written_ok, write_err = writeTextFileSafely(PLUGIN_PATH, mainCode)
+      local cleanVer = trim(tostring(onlineVersion or ""))
+      local patchedCode = tostring(mainCode)
+      if cleanVer ~= "" then
+        patchedCode = patchedCode:gsub('local%s+DEFAULT_VERSION%s*=%s*"[^"]*"', 'local DEFAULT_VERSION = "' .. cleanVer .. '"')
+        patchedCode = patchedCode:gsub('local%s+CURRENT_VERSION%s*=%s*"[^"]*"', 'local CURRENT_VERSION = "' .. cleanVer .. '"')
+      end
+
+      local written_ok, write_err = writeTextFileSafely(PLUGIN_PATH, patchedCode)
       updateInProgress = false
 
       if written_ok then
+        if cleanVer ~= "" then
+          CURRENT_VERSION = cleanVer
+          update_prefs.edit()
+            .putString("installed_app_version", cleanVer)
+            .putString("lastShownVersion", cleanVer)
+            .apply()
+        end
+        updateDismissedThisSession = true
+
         playUpdateAlertCue()
         AlertDialog.Builder(activity)
           .setTitle("Update Successful")
-          .setMessage("Successfully updated to version " .. tostring(onlineVersion or "") .. ".\n\nClick OK to restart and apply the update.")
+          .setMessage("Successfully updated to version " .. cleanVer .. ".\n\nClick OK to restart and apply the update.")
           .setCancelable(false)
           .setPositiveButton("OK", DialogInterface.OnClickListener{
             onClick = function()
-              update_prefs.edit().putString("lastShownVersion", tostring(onlineVersion or "")).apply()
               pcall(function() stopActiveVoicePlayer(false) end)
               pcall(function() stopBackgroundNotificationWatcher() end)
+              pcall(function() stopIncomingCallWatcher() end)
               pcall(function() if _G.mainDialog then _G.mainDialog.dismiss() _G.mainDialog = nil end end)
               pcall(function() if _G.mainDlg then _G.mainDlg.dismiss() _G.mainDlg = nil end end)
               pcall(function() if _G.allDialogBox then _G.allDialogBox.dismiss() _G.allDialogBox = nil end end)
@@ -474,7 +501,7 @@ local function performUpdate(mainCode, onlineVersion)
 
               local func, err = loadfile(PLUGIN_PATH)
               if func then
-                local run_ok, run_err = pcall(func)
+                local run_ok = pcall(func)
                 if not run_ok then
                   showToast("Restarting app to apply update...")
                   pcall(function() activity.recreate() end)
@@ -496,8 +523,12 @@ local function performUpdate(mainCode, onlineVersion)
 end
 
 function checkUpdate(manualCheck)
-  if updateInProgress then
+  if updateInProgress or updateDialogShowing then
     if manualCheck then showToast("Update already in progress...") end
+    return
+  end
+
+  if (not manualCheck) and updateDismissedThisSession then
     return
   end
 
@@ -512,15 +543,21 @@ function checkUpdate(manualCheck)
     showToast("Checking for updates...")
   end
 
+  CURRENT_VERSION = getCurrentAppVersion()
   local timestamp = tostring(System.currentTimeMillis())
+
   Http.get(VERSION_URL .. "?t=" .. timestamp, nil, "utf-8", nil, function(code, response)
     if code == 200 and response then
       local onlineVersion = trim(response)
-      if onlineVersion ~= "" and onlineVersion ~= CURRENT_VERSION then
+      local alreadyInstalled = tostring(update_prefs.getString("installed_app_version", ""))
+
+      if onlineVersion ~= "" and onlineVersion ~= CURRENT_VERSION and onlineVersion ~= alreadyInstalled then
         Http.get(UPDATE_CODE_URL .. "?t=" .. timestamp, nil, "utf-8", nil, function(code2, mainCode)
           if code2 == 200 and mainCode and trim(mainCode) ~= "" then
             Handler(Looper.getMainLooper()).post(Runnable({
               run = function()
+                if updateDialogShowing then return end
+                updateDialogShowing = true
                 playUpdateAlertCue()
                 AlertDialog.Builder(activity)
                   .setTitle("Update Available!")
@@ -528,11 +565,17 @@ function checkUpdate(manualCheck)
                   .setCancelable(false)
                   .setPositiveButton("Update Now", DialogInterface.OnClickListener{
                     onClick = function()
+                      updateDialogShowing = false
                       showToast("Downloading update...")
                       performUpdate(mainCode, onlineVersion)
                     end
                   })
-                  .setNegativeButton("Later", nil)
+                  .setNegativeButton("Later", DialogInterface.OnClickListener{
+                    onClick = function()
+                      updateDialogShowing = false
+                      updateDismissedThisSession = true
+                    end
+                  })
                   .show()
               end
             }))
@@ -540,8 +583,14 @@ function checkUpdate(manualCheck)
             showUpdateErrorDialog("Update Check Failed", "Could not download main.lua (HTTP " .. tostring(code2) .. ").")
           end
         end)
-      elseif manualCheck then
-        showMessage("Up to Date", "You are already using the latest version (" .. CURRENT_VERSION .. ").")
+      else
+        if onlineVersion ~= "" then
+          CURRENT_VERSION = onlineVersion
+          update_prefs.edit().putString("installed_app_version", onlineVersion).apply()
+        end
+        if manualCheck then
+          showMessage("Up to Date", "You are already using the latest version (" .. CURRENT_VERSION .. ").")
+        end
       end
     elseif manualCheck then
       showUpdateErrorDialog("Update Check Failed", "Unable to reach version server (HTTP " .. tostring(code) .. ").")
@@ -550,7 +599,7 @@ function checkUpdate(manualCheck)
 end
 
 -- ========================================================
--- SERVER STATUS & ROLE HELPERS (DEVELOPER / VERIFIED / ADMIN)
+-- SERVER STATUS & ROLE HELPERS
 -- ========================================================
 
 local function isDeveloper(name)
@@ -1102,34 +1151,24 @@ local function syncServerAndRoomSettings(callback)
     if callback then callback() end
     return
   end
-  Http.get(FIREBASE_URL .. "settings/server_down.json", nil, "utf-8", nil, function(c1, r1)
-    if c1 == 200 then
-      server_is_down = (r1 == "true" or r1 == '"true"')
-    end
-    Http.get(FIREBASE_URL .. "settings/public_room_locked.json", nil, "utf-8", nil, function(c2, r2)
-      if c2 == 200 then
-        public_room_locked = (r2 == "true" or r2 == '"true"')
-      end
-      Http.get(FIREBASE_URL .. "settings/assistant_locked.json", nil, "utf-8", nil, function(c3, r3)
-        if c3 == 200 then
-          assistant_is_locked = (r3 == "true" or r3 == '"true"')
-        end
-        Http.get(FIREBASE_URL .. "settings/assistant_training.json", nil, "utf-8", nil, function(c4, r4)
-          assistant_trained_items = {}
-          if c4 == 200 and r4 and r4 ~= "null" then
-            local ok_t, tdata = pcall(cjson.decode, r4)
-            if ok_t and type(tdata) == "table" then
-              for _, item in pairs(tdata) do
-                if type(item) == "table" and trim(tostring(item.q or "")) ~= "" and trim(tostring(item.a or "")) ~= "" then
-                  table.insert(assistant_trained_items, item)
-                end
-              end
+  Http.get(FIREBASE_URL .. "settings.json", nil, "utf-8", nil, function(code, content)
+    if code == 200 and content and content ~= "null" then
+      local ok, sdata = pcall(cjson.decode, content)
+      if ok and type(sdata) == "table" then
+        server_is_down = (sdata.server_down == true or sdata.server_down == "true")
+        public_room_locked = (sdata.public_room_locked == true or sdata.public_room_locked == "true")
+        assistant_is_locked = (sdata.assistant_locked == true or sdata.assistant_locked == "true")
+        assistant_trained_items = {}
+        if type(sdata.assistant_training) == "table" then
+          for _, item in pairs(sdata.assistant_training) do
+            if type(item) == "table" and trim(tostring(item.q or "")) ~= "" and trim(tostring(item.a or "")) ~= "" then
+              table.insert(assistant_trained_items, item)
             end
           end
-          if callback then callback() end
-        end)
-      end)
-    end)
+        end
+      end
+    end
+    if callback then callback() end
   end)
 end
 
@@ -1252,17 +1291,30 @@ local function updatePresence(status_str)
   http_post_or_put(FIREBASE_URL .. "user_presence/" .. encodeKey(current_username) .. ".json", "PUT", presence_data, function() end)
 end
 
+local function stopPresenceTracking()
+  if presence_handler and presence_runnable then
+    pcall(function() presence_handler.removeCallbacks(presence_runnable) end)
+  end
+  presence_handler = nil
+  presence_runnable = nil
+end
+
 local function startPresenceTracking()
+  if not isAppForeground then return end
   updatePresence("online")
   if presence_handler == nil then
     presence_handler = Handler(Looper.getMainLooper())
     presence_runnable = Runnable({
       run = function()
-        updatePresence("online")
-        presence_handler.postDelayed(presence_runnable, 120000)
+        if isAppForeground then
+          updatePresence("online")
+          presence_handler.postDelayed(presence_runnable, 180000)
+        else
+          stopPresenceTracking()
+        end
       end
     })
-    presence_handler.postDelayed(presence_runnable, 120000)
+    presence_handler.postDelayed(presence_runnable, 180000)
   end
 end
 
@@ -1274,7 +1326,7 @@ local function getOnlineUsersSummary(presence_json_str)
       local now = os.time()
       local seen_norm = {}
       for pk, p in pairs(pdata) do
-        if type(p) == "table" and p.status == "online" and (now - tonumber(p.time_epoch or 0) < 180) then
+        if type(p) == "table" and p.status == "online" and (now - tonumber(p.time_epoch or 0) < 240) then
           local uname = trim(tostring(p.username or Uri.decode(tostring(pk))))
           if uname ~= "" then
             local low = uname:lower()
@@ -1306,7 +1358,7 @@ local function getOnlineUsersSummary(presence_json_str)
 end
 
 -- ========================================================
--- VOICE CALL ENGINE (0-15s LOOP VOICEMAIL, CLEAN STOP, TIMEOUT, ACCESSIBLE LABELS)
+-- VOICE CALL ENGINE
 -- ========================================================
 
 local function setCallAudioMode(speaker_on, muted)
@@ -1338,7 +1390,7 @@ local function isUserCurrentlyOnline(target_name, callback)
       if ok and type(data) == "table" then
         local now = os.time()
         local last_t = tonumber(data.time_epoch or 0)
-        if data.status == "online" and (now - last_t < 180) then
+        if data.status == "online" and (now - last_t < 240) then
           if callback then callback(true) end
           return
         end
@@ -1588,7 +1640,7 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
               local uname = (type(v) == "table" and v.username) or k
               if uname and uname ~= "" and trim(uname):lower() ~= trim(current_username):lower() then
                 local pe = pdata[encodeKey(uname)] or pdata[uname]
-                if type(pe) == "table" and pe.status == "online" and (now - tonumber(pe.time_epoch or 0) < 180) then
+                if type(pe) == "table" and pe.status == "online" and (now - tonumber(pe.time_epoch or 0) < 240) then
                   table.insert(online_candidates, uname)
                 end
               end
@@ -1774,125 +1826,119 @@ local function initiateVoiceCall(call_type, target_or_id, title_label, member_li
   end
 end
 
+function stopIncomingCallWatcher()
+  if incoming_call_handler ~= nil and incoming_call_runnable ~= nil then
+    pcall(function()
+      incoming_call_handler.removeCallbacks(incoming_call_runnable)
+    end)
+  end
+  incoming_call_handler = nil
+  incoming_call_runnable = nil
+end
+
 local function startIncomingCallWatcher()
-  if incoming_call_handler ~= nil then return end
+  if incoming_call_handler ~= nil or not isAppForeground then return end
   incoming_call_handler = Handler(Looper.getMainLooper())
   incoming_call_runnable = Runnable({
     run = function()
-      if current_username ~= "" and active_call_dialog == nil and isNetworkAvailable() then
-        http_get(FIREBASE_URL .. "settings/room_live_voice.json", function(s_lv, r_lv)
-          if s_lv and r_lv and r_lv ~= "null" and active_call_dialog == nil then
-            local ok_lv, lv_data = pcall(cjson.decode, r_lv)
-            if ok_lv and type(lv_data) == "table" then
-              local lvid = tostring(lv_data.id or "")
-              local lv_caller = tostring(lv_data.caller or "Member")
-              local lv_ep = tonumber(lv_data.created_epoch or 0)
-              if lvid ~= "" and lvid ~= last_seen_live_vc_id and (os.time() - lv_ep) < 120 and trim(lv_caller):lower() ~= trim(current_username):lower() then
-                last_seen_live_vc_id = lvid
-                sp.edit().putString("last_seen_live_vc_id", lvid).apply()
-                playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
-                AlertDialog.Builder(activity)
-                  .setTitle("Live Voice Chat Started")
-                  .setMessage(getVerifiedName(lv_caller) .. " started a live voice chat in BTP Voice Room.")
-                  .setPositiveButton("Join Voice Chat", DialogInterface.OnClickListener{
-                    onClick = function()
-                      http_post_or_put(FIREBASE_URL .. "voice_calls/" .. lvid .. "/participants/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function()
-                        openActiveCallSessionDialog(lvid, {
-                          call_type = "room_live",
-                          title = "BTP Voice Room Live",
-                          caller = lv_caller
-                        }, false)
-                      end)
-                    end
-                  })
-                  .setNegativeButton("Dismiss", nil)
-                  .show()
-              end
-            end
-          end
-        end)
+      if not isAppForeground then
+        stopIncomingCallWatcher()
+        return
+      end
 
-        http_get(FIREBASE_URL .. "voice_calls.json", function(s, r)
-          if s and r and r ~= "null" and active_call_dialog == nil then
-            local ok, calls = pcall(cjson.decode, r)
-            if ok and type(calls) == "table" then
+      if current_username ~= "" and active_call_dialog == nil and isNetworkAvailable() then
+        http_get(FIREBASE_URL .. "voice_calls.json?shallow=true", function(s_sh, r_sh)
+          if not isAppForeground or active_call_dialog ~= nil then return end
+          if s_sh and r_sh and r_sh ~= "null" then
+            local ok_sh, keys_map = pcall(cjson.decode, r_sh)
+            if ok_sh and type(keys_map) == "table" and table_size(keys_map) > 0 then
               local now = os.time()
               local my_norm = trim(current_username):lower()
-              for cid, cdata in pairs(calls) do
-                if type(cdata) == "table" and tostring(cdata.call_type or "") ~= "room_live" and tostring(cdata.status or "") == "ringing" and (now - tonumber(cdata.created_epoch or 0) < CALL_RING_TIMEOUT_SEC) then
-                  local is_invited = false
-                  if type(cdata.invited) == "table" then
-                    for ik, iv in pairs(cdata.invited) do
-                      local iname = type(iv) == "string" and iv or Uri.decode(tostring(ik))
-                      if trim(iname):lower() == my_norm then
-                        is_invited = true
-                        break
-                      end
-                    end
-                  end
-                  if is_invited and trim(tostring(cdata.caller or "")):lower() ~= my_norm then
-                    local ctype = tostring(cdata.call_type or "direct")
-                    local caller_name = tostring(cdata.caller or "User")
-                    local ctitle = tostring(cdata.title or caller_name)
-                    local ring_mp = playSound(SOUND_GROUP_CALL_RING, nil, ToneGenerator.TONE_SUP_RINGTONE, false)
-
-                    local function stopIncomingRing()
-                      if ring_mp ~= nil then
-                        pcall(function()
-                          if ring_mp.isPlaying() then ring_mp.stop() end
-                          ring_mp.release()
-                        end)
-                        ring_mp = nil
-                      end
-                    end
-
-                    local call_prompt_msg = (ctype == "group")
-                      and ("Incoming Group Call from " .. getVerifiedName(caller_name) .. " in group: " .. ctitle)
-                      or ("Incoming Voice Call from " .. getVerifiedName(caller_name))
-
-                    AlertDialog.Builder(activity)
-                      .setTitle(ctype == "group" and "Incoming Group Call" or "Incoming Voice Call")
-                      .setMessage(call_prompt_msg)
-                      .setCancelable(false)
-                      .setPositiveButton("Answer Call", DialogInterface.OnClickListener{
-                        onClick = function()
-                          stopIncomingRing()
-                          playSound(SOUND_CALL_CONNECTED, nil, ToneGenerator.TONE_PROP_ACK, false)
-                          http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/participants/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function()
-                            http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/status.json", "PUT", "active", function()
-                              openActiveCallSessionDialog(cid, cdata, false)
-                            end)
-                          end)
-                        end
-                      })
-                      .setNegativeButton("End Call", DialogInterface.OnClickListener{
-                        onClick = function()
-                          stopIncomingRing()
-                          http_delete(FIREBASE_URL .. "voice_calls/" .. cid .. "/invited/" .. encodeKey(current_username) .. ".json", function() end)
-                          if ctype == "direct" then
-                            http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/status.json", "PUT", "ended", function() end)
+              for cid, _ in pairs(keys_map) do
+                local ep_str = tostring(cid):match("^call_(%d+)_")
+                local ep_num = tonumber(ep_str or 0)
+                if ep_num > 0 and (now - ep_num) < (CALL_RING_TIMEOUT_SEC + 10) then
+                  http_get(FIREBASE_URL .. "voice_calls/" .. tostring(cid) .. ".json", function(s, r)
+                    if not isAppForeground or active_call_dialog ~= nil then return end
+                    if s and r and r ~= "null" then
+                      local ok, cdata = pcall(cjson.decode, r)
+                      if ok and type(cdata) == "table" and tostring(cdata.call_type or "") ~= "room_live" and tostring(cdata.status or "") == "ringing" and (os.time() - tonumber(cdata.created_epoch or 0) < CALL_RING_TIMEOUT_SEC) then
+                        local is_invited = false
+                        if type(cdata.invited) == "table" then
+                          for ik, iv in pairs(cdata.invited) do
+                            local iname = type(iv) == "string" and iv or Uri.decode(tostring(ik))
+                            if trim(iname):lower() == my_norm then
+                              is_invited = true
+                              break
+                            end
                           end
                         end
-                      })
-                      .show()
-                    break
-                  end
+                        if is_invited and trim(tostring(cdata.caller or "")):lower() ~= my_norm then
+                          local ctype = tostring(cdata.call_type or "direct")
+                          local caller_name = tostring(cdata.caller or "User")
+                          local ctitle = tostring(cdata.title or caller_name)
+                          local ring_mp = playSound(SOUND_GROUP_CALL_RING, nil, ToneGenerator.TONE_SUP_RINGTONE, false)
+
+                          local function stopIncomingRing()
+                            if ring_mp ~= nil then
+                              pcall(function()
+                                if ring_mp.isPlaying() then ring_mp.stop() end
+                                ring_mp.release()
+                              end)
+                              ring_mp = nil
+                            end
+                          end
+
+                          local call_prompt_msg = (ctype == "group")
+                            and ("Incoming Group Call from " .. getVerifiedName(caller_name) .. " in group: " .. ctitle)
+                            or ("Incoming Voice Call from " .. getVerifiedName(caller_name))
+
+                          AlertDialog.Builder(activity)
+                            .setTitle(ctype == "group" and "Incoming Group Call" or "Incoming Voice Call")
+                            .setMessage(call_prompt_msg)
+                            .setCancelable(false)
+                            .setPositiveButton("Answer Call", DialogInterface.OnClickListener{
+                              onClick = function()
+                                stopIncomingRing()
+                                playSound(SOUND_CALL_CONNECTED, nil, ToneGenerator.TONE_PROP_ACK, false)
+                                http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/participants/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function()
+                                  http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/status.json", "PUT", "active", function()
+                                    openActiveCallSessionDialog(cid, cdata, false)
+                                  end)
+                                end)
+                              end
+                            })
+                            .setNegativeButton("End Call", DialogInterface.OnClickListener{
+                              onClick = function()
+                                stopIncomingRing()
+                                http_delete(FIREBASE_URL .. "voice_calls/" .. cid .. "/invited/" .. encodeKey(current_username) .. ".json", function() end)
+                                if ctype == "direct" then
+                                  http_post_or_put(FIREBASE_URL .. "voice_calls/" .. cid .. "/status.json", "PUT", "ended", function() end)
+                                end
+                              end
+                            })
+                            .show()
+                        end
+                      end
+                    end
+                  end)
                 end
               end
             end
           end
         end)
       end
-      if incoming_call_handler and incoming_call_runnable then
-        incoming_call_handler.postDelayed(incoming_call_runnable, 3500)
+
+      if isAppForeground and incoming_call_handler and incoming_call_runnable then
+        incoming_call_handler.postDelayed(incoming_call_runnable, 12000)
       end
     end
   })
-  incoming_call_handler.postDelayed(incoming_call_runnable, 3500)
+  incoming_call_handler.postDelayed(incoming_call_runnable, 6000)
 end
 
 -- ========================================================
--- BTP ASSISTANT ENGINE (LIGHTWEIGHT + FAST + TRAINING Q&A + FEEDBACK + LOCK)
+-- BTP ASSISTANT ENGINE
 -- ========================================================
 
 local assistantTaskCounter = 0
@@ -2021,12 +2067,22 @@ local function findLocalTrainedAnswer(queryStr)
       return tostring(item.a or "")
     end
   end
+
+  if qLow == "hi" or qLow == "hello" or qLow == "namaste" or qLow == "salam" or qLow == "assalamualaikum" then
+    return "Namaste " .. ((current_username ~= "" and current_username) or "Dost") .. "! Main BTP Assistant hoon. Aap mujhse AndroLua code, app features, ya koi bhi sawal poochh sakte hain."
+  elseif qLow:find("tum kaun ho", 1, true) or qLow:find("who are you", 1, true) or qLow:find("apna naam", 1, true) then
+    return "Main BTP Assistant hoon, jise Ibrahim Ansari ne Blind Tech Power Hub ke liye banaya hai."
+  elseif qLow:find("developer", 1, true) or qLow:find("kisne banaya", 1, true) then
+    return "Is app aur BTP Assistant ko Ibrahim Ansari ne develop kiya hai."
+  elseif qLow:find("version", 1, true) then
+    return "Aap abhi version " .. CURRENT_VERSION .. " istemal kar rahe hain."
+  end
   return nil
 end
 
 local function isFeedbackRequestText(queryStr)
   local l = trim(tostring(queryStr or "")):lower()
-  return (l:find("feedback", 1, true) ~= nil or l:find("sugjav", 1, true) ~= nil or l:find("sujhav", 1, true) ~= nil or l:find("report", 1, true) ~= nil)
+  return (l:find("feedback", 1, true) ~= nil or l:find("sugjav", 1, true) ~= nil or l:find("sujhav", 1, true) or l:find("report", 1, true) ~= nil)
 end
 
 local function submitAssistantFeedbackToFirebase(userName, feedbackText, onDone)
@@ -2041,6 +2097,21 @@ local function submitAssistantFeedbackToFirebase(userName, feedbackText, onDone)
   end)
 end
 
+local function sanitizeAiResponseText(rawTxt)
+  local t = trim(tostring(rawTxt or ""))
+  if t == "" then return "" end
+  local ok, parsed = pcall(cjson.decode, t)
+  if ok and type(parsed) == "table" then
+    t = parsed.reply or parsed.response or parsed.message or parsed.text or parsed.answer or ""
+    t = trim(tostring(t))
+  end
+  local low = t:lower()
+  if low == "" or low == "null" or low:find("<!doctype html", 1, true) or low:find("<html", 1, true) or low:find("error 5", 1, true) or low:find("rate limit", 1, true) then
+    return ""
+  end
+  return t
+end
+
 local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQuery, callback)
   local matchedLocal = findLocalTrainedAnswer(fallbackQuery)
   if matchedLocal and matchedLocal ~= "" then
@@ -2048,30 +2119,40 @@ local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQue
     return
   end
 
-  local mId = (modelObj and modelObj.backendId) or "gemini-flash"
-  local primaryUrl = "https://ai-hub.schoolofmindlight.workers.dev/?model=" .. URLEncoder.encode(mId, "UTF-8") .. "&chat=" .. URLEncoder.encode(promptText, "UTF-8")
+  if not isNetworkAvailable() then
+    callback(false, "")
+    return
+  end
 
-  Http.get(primaryUrl, nil, "UTF-8", nil, function(code1, content1)
-    if code1 == 200 and content1 and trim(tostring(content1)) ~= "" then
-      local reply1 = content1
-      local ok1, parsed1 = pcall(cjson.decode, content1)
-      if ok1 and type(parsed1) == "table" then
-        reply1 = parsed1.reply or parsed1.response or parsed1.message or parsed1.text or content1
-      end
-      reply1 = trim(tostring(reply1))
-      if reply1 ~= "" and not reply1:lower():find("error", 1, true) then
-        callback(true, reply1)
-        return
-      end
+  local mId = (modelObj and modelObj.backendId) or "gemini-flash"
+  local encodedPrompt = URLEncoder.encode(promptText, "UTF-8")
+  local encodedRawQ = URLEncoder.encode(tostring(fallbackQuery or promptText):sub(1, 300), "UTF-8")
+
+  local url1 = "https://ai-hub.schoolofmindlight.workers.dev/?model=" .. URLEncoder.encode(mId, "UTF-8") .. "&chat=" .. encodedPrompt
+  Http.get(url1, nil, "UTF-8", nil, function(code1, content1)
+    local r1 = (code1 == 200) and sanitizeAiResponseText(content1) or ""
+    if r1 ~= "" then
+      callback(true, r1)
+      return
     end
 
-    local secUrl = "https://text.pollinations.ai/" .. URLEncoder.encode(promptText:sub(1, 350), "UTF-8") .. "?model=openai"
-    Http.get(secUrl, nil, "UTF-8", nil, function(code2, content2)
-      if code2 == 200 and content2 and trim(tostring(content2)) ~= "" then
-        callback(true, trim(tostring(content2)))
-      else
-        callback(false, "")
+    local url2 = "https://text.pollinations.ai/" .. encodedRawQ
+    Http.get(url2, nil, "UTF-8", nil, function(code2, content2)
+      local r2 = (code2 == 200) and sanitizeAiResponseText(content2) or ""
+      if r2 ~= "" then
+        callback(true, r2)
+        return
       end
+
+      local url3 = "https://ai-hub.schoolofmindlight.workers.dev/?model=gemini-flash&chat=" .. encodedRawQ
+      Http.get(url3, nil, "UTF-8", nil, function(code3, content3)
+        local r3 = (code3 == 200) and sanitizeAiResponseText(content3) or ""
+        if r3 ~= "" then
+          callback(true, r3)
+        else
+          callback(false, "")
+        end
+      end)
     end)
   end)
 end
@@ -2207,7 +2288,7 @@ local function openAssistantLiveVoiceDialog()
             if ok and reply ~= "" then
               speakLiveReply(reply)
             else
-              speakLiveReply("Abhi jawab aane mein thodi der ho rahi hai, dobara boliye.")
+              speakLiveReply("Abhi network slow hai, kripya ek baar phir boliye.")
             end
           end)
         end,
@@ -2437,7 +2518,7 @@ function openBTPAssistantDialog()
   root.addView(bottomRow)
 
   local function refreshAssistantLockView()
-    if assistant_is_locked then
+    if assistant_is_locked and not isDeveloper(current_username) then
       lockedBanner.setVisibility(View.VISIBLE)
       bottomRow.setVisibility(View.GONE)
     else
@@ -2454,14 +2535,11 @@ function openBTPAssistantDialog()
 
   local function runAssistantQuery(userQuery)
     if notifyServerDownIfNeeded() then return end
-    if assistant_is_locked then
+    if assistant_is_locked and not isDeveloper(current_username) then
       refreshAssistantLockView()
       showToast("Assistant is currently locked.")
       return
     end
-
-    local q = trim(userQuery)
-    if q == "" then return end
 
     if isGenerating then
       isGenerating = false
@@ -2470,6 +2548,9 @@ function openBTPAssistantDialog()
       sendBtn.setText("Send")
       return
     end
+
+    local q = trim(userQuery)
+    if q == "" then return end
 
     playSound(SOUND_SEND, nil, ToneGenerator.TONE_PROP_BEEP, false)
     msgInput.setText("")
@@ -2506,7 +2587,7 @@ function openBTPAssistantDialog()
     local sysPrompt = "You are BTP Assistant in " .. APP_TITLE .. ". "
       .. (trainedCtx ~= "" and ("Info: " .. trainedCtx .. ". ") or "")
       .. recentCtx
-      .. "Q: " .. q .. "\nAnswer directly and concisely without emojis."
+      .. "Q: " .. q .. "\nAnswer directly and concisely in clear Hindi/English without emojis."
     if #sysPrompt > 480 then sysPrompt = sysPrompt:sub(-480) end
 
     fetchAssistantReplyWithFallback(chosenModel, sysPrompt, q, function(ok, reply)
@@ -2526,7 +2607,7 @@ function openBTPAssistantDialog()
           sp.edit().putString("btp_ast_memory", table.concat(chatHistory, " | ")).apply()
         end
       else
-        appendAstBubble("BTP Assistant", "Abhi server se jawab nahi mil paaya, kripya thodi der baad dubara poochhiye.", true, false)
+        appendAstBubble("BTP Assistant", "Abhi AI server busy hai. Kripya apna internet check karein ya 5 second baad dubara poochhiye.", true, false)
       end
     end)
   end
@@ -2536,15 +2617,20 @@ function openBTPAssistantDialog()
   end)
 
   micBtn.setOnClickListener(function()
-    if assistant_is_locked then
+    if assistant_is_locked and not isDeveloper(current_username) then
       refreshAssistantLockView()
       showToast("Assistant is currently locked.")
       return
     end
-    if isMicBusy then return end
+    if isMicBusy then
+      isMicBusy = false
+      micBtn.setText("Microphone")
+      pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
+      return
+    end
     isMicBusy = true
     stopAstAudio()
-    pcall(function()
+    local okMic = pcall(function()
       micRec = SpeechRecognizer.createSpeechRecognizer(activity)
       local it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
       it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -2562,7 +2648,7 @@ function openBTPAssistantDialog()
           done = true
           isMicBusy = false
           micBtn.setText("Microphone")
-          pcall(function() micRec.cancel() micRec.destroy() micRec = nil end)
+          pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
         end,
         onResults = function(res)
           if done then return end
@@ -2570,7 +2656,7 @@ function openBTPAssistantDialog()
           isMicBusy = false
           micBtn.setText("Microphone")
           local matches = res.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-          pcall(function() micRec.cancel() micRec.destroy() micRec = nil end)
+          pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
           if matches and matches.size() > 0 then
             runAssistantQuery(tostring(matches.get(0)))
           end
@@ -2580,6 +2666,11 @@ function openBTPAssistantDialog()
       })
       micRec.startListening(it)
     end)
+    if not okMic then
+      isMicBusy = false
+      micBtn.setText("Microphone")
+      showToast("Microphone unavailable.")
+    end
   end)
 
   moreBtn.setOnClickListener(function()
@@ -2660,7 +2751,7 @@ function openBTPAssistantDialog()
 end
 
 -- ========================================================
--- ASSISTANT MANAGEMENT DIALOG (LOCK + TRAIN Q&A + VIEW FEEDBACKS)
+-- ASSISTANT MANAGEMENT DIALOG
 -- ========================================================
 
 local function showAssistantManagementDialog()
@@ -2754,43 +2845,21 @@ local function showAssistantManagementDialog()
 end
 
 -- ========================================================
--- SILENT AUTO-CLEANUP (CHATS 7D + INACTIVE GROUPS <5 MEMBERS IN 3D)
+-- DATA-SAVING CLEANUP (RUNS ONCE PER 24 HOURS ONLY)
 -- ========================================================
 
 local function runSilentAutoCleanup()
-  if not isNetworkAvailable() then return end
+  if not isNetworkAvailable() or not isAppForeground then return end
+  local now = os.time()
+  local last_cleanup = tonumber(sp.getString("last_cleanup_epoch", "0")) or 0
+  if (now - last_cleanup) < 86400 then
+    return
+  end
+  sp.edit().putString("last_cleanup_epoch", tostring(now)).apply()
+
   pcall(function()
-    local now = os.time()
     local seven_days_sec = 7 * 86400
     local three_days_sec = 3 * 86400
-    local cutoff_epoch = now - seven_days_sec
-    local cutoff_raw = os.date("%Y%m%d%H%M%S", cutoff_epoch)
-
-    http_get(FIREBASE_URL .. "personal_chats.json", function(s, r)
-      if s and r and r ~= "null" then
-        local ok, data = pcall(cjson.decode, r)
-        if ok and type(data) == "table" then
-          for room_key, msgs in pairs(data) do
-            if type(msgs) == "table" then
-              local all_expired = true
-              for mid, m in pairs(msgs) do
-                if type(m) == "table" then
-                  local m_raw = tostring(m.timestamp_raw or "")
-                  if m_raw ~= "" and m_raw < cutoff_raw then
-                    http_delete(FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. mid .. ".json", function() end)
-                  else
-                    all_expired = false
-                  end
-                end
-              end
-              if all_expired then
-                http_delete(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", function() end)
-              end
-            end
-          end
-        end
-      end
-    end)
 
     http_get(FIREBASE_URL .. "btp_groups.json", function(s, r)
       if s and r and r ~= "null" then
@@ -2817,27 +2886,6 @@ local function runSilentAutoCleanup()
           for u, req in pairs(data) do
             if type(req) == "table" and req.timestamp_epoch and (now - tonumber(req.timestamp_epoch)) > seven_days_sec then
               http_delete(FIREBASE_URL .. "unblock_requests/" .. u .. ".json", function() end)
-            end
-          end
-        end
-      end
-    end)
-
-    http_get(FIREBASE_URL .. "codes.json", function(s, r)
-      if s and r and r ~= "null" then
-        local ok, data = pcall(cjson.decode, r)
-        if ok and type(data) == "table" then
-          local code_list = {}
-          for k, v in pairs(data) do
-            if type(v) == "table" then
-              table.insert(code_list, { id = k, ts = tostring(v.timestamp_raw or v.timestamp or "") })
-            end
-          end
-          if #code_list > 100 then
-            table.sort(code_list, function(a, b) return a.ts < b.ts end)
-            local excess = #code_list - 100
-            for i = 1, excess do
-              http_delete(FIREBASE_URL .. "codes/" .. code_list[i].id .. ".json", function() end)
             end
           end
         end
@@ -3018,12 +3066,12 @@ function stopBackgroundNotificationWatcher()
 end
 
 function updateNotificationCount(silent)
-  if not notif_button or not isNetworkAvailable() then return end
+  if not notif_button or not isNetworkAvailable() or not isAppForeground then return end
   
   local seen_map = getSeenNotifsMap()
 
   http_get(FIREBASE_URL .. "codes.json", function(success, response)
-    if not success or not response or response == "null" then return end
+    if not success or not response or response == "null" or not isAppForeground then return end
 
     local unseen_notif_count = 0
     local new_code_discovered = false
@@ -3075,6 +3123,7 @@ function updateNotificationCount(silent)
     end
 
     http_get(FIREBASE_URL .. "settings/broadcast.json", function(s_b, r_b)
+      if not isAppForeground then return end
       if s_b and r_b and r_b ~= "null" then
         local b_text = tostring(r_b)
         local ok_b, dec_b = pcall(cjson.decode, r_b)
@@ -3113,22 +3162,22 @@ function updateNotificationCount(silent)
 end
 
 local function startBackgroundNotificationWatcher()
-  if not sp.getBoolean("notif_sound_enabled", false) then return end
+  if not sp.getBoolean("notif_sound_enabled", false) or not isAppForeground then return end
   if bg_notif_handler == nil then
     bg_notif_handler = Handler(Looper.getMainLooper())
     bg_notif_runnable = Runnable({
       run = function()
-        if isNetworkAvailable() and sp.getBoolean("notif_sound_enabled", false) then
+        if isAppForeground and isNetworkAvailable() and sp.getBoolean("notif_sound_enabled", false) then
           updateNotificationCount(false)
           if bg_notif_handler and bg_notif_runnable then
-            bg_notif_handler.postDelayed(bg_notif_runnable, 30000)
+            bg_notif_handler.postDelayed(bg_notif_runnable, 60000)
           end
         else
           stopBackgroundNotificationWatcher()
         end
       end
     })
-    bg_notif_handler.postDelayed(bg_notif_runnable, 30000)
+    bg_notif_handler.postDelayed(bg_notif_runnable, 60000)
   end
 end
 
@@ -3224,7 +3273,7 @@ function showNotificationsDialog()
 end
 
 -- ========================================================
--- PERSONAL CHAT (1-ON-1 WITH VOICE CALL + SEEN BY + DELETE LOCK)
+-- PERSONAL CHAT (1-ON-1)
 -- ========================================================
 
 local function getSymmetricChatKey(u1, u2)
@@ -3629,7 +3678,7 @@ function openPersonalChat(target_user)
         if ok and type(data) == "table" then
           local current_time = os.time()
           local last_time = tonumber(data.time_epoch or 0)
-          if data.status == "online" and (current_time - last_time < 180) then
+          if data.status == "online" and (current_time - last_time < 240) then
             chat_title_tv.setText(base_name .. " (Online)")
             dialog.setTitle(base_name .. " (Online)")
           else
@@ -3650,7 +3699,7 @@ function openPersonalChat(target_user)
 
   local function loadMessages(force_refresh)
     if not is_chat_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", function(success, response)
+    http_get(FIREBASE_URL .. "personal_chats/" .. room_key .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
       if not is_chat_active then return end
       local msg_list = {}
       local current_hash_builder = {}
@@ -3874,14 +3923,10 @@ function openPersonalChat(target_user)
 
   live_runnable = Runnable({
     run = function()
-      if is_chat_active then
-        syncServerAndRoomSettings(function()
-          if is_chat_active then
-            loadMessages(false)
-            checkPeerBlockStatus()
-            checkTargetPresence()
-          end
-        end)
+      if is_chat_active and isAppForeground then
+        loadMessages(false)
+        checkPeerBlockStatus()
+        checkTargetPresence()
         live_handler.postDelayed(live_runnable, CHAT_POLL_INTERVAL_MS)
       end
     end
@@ -3974,25 +4019,31 @@ function openPersonalChat(target_user)
 end
 
 -- ========================================================
--- BTP VOICE ROOM (PUBLIC ROOM LOCK + ONLINE NAMES + LIMIT 100/200 + START VOICE CHAT)
+-- BTP VOICE ROOM (CLEAN TITLE: ONLY ONLINE COUNT + TOP 100/200 TABS THAT HIDE ON CLICK)
 -- ========================================================
 
 function openBtpVoiceRoomDialog()
   local layout = makeLayout(true, 10)
 
-  local room_header = makeLayout(false, 5)
   local initial_lock_view = public_room_locked and not canBypassRoomLock(current_username)
-  local initial_title = initial_lock_view and "BTP Voice Room" or ("BTP Voice Room (1 online • " .. current_username .. ")")
-  local title_tv = makeText(initial_title, 15)
+  local initial_title = initial_lock_view and "BTP Voice Room" or "BTP Voice Room (1 online)"
+  local title_tv = makeText(initial_title, 16)
   title_tv.setTextColor(0xFF1E88E5)
-  room_header.addView(title_tv, LinearLayout.LayoutParams(0, -2, 1))
+  title_tv.setPadding(4, 2, 4, 6)
+  layout.addView(title_tv)
 
-  local msg_limit_modes = {0, 100, 200}
-  local limit_idx = 1
-  local limit_btn = makeButton("Msgs: All")
-  limit_btn.setContentDescription("Message limit: All")
-  room_header.addView(limit_btn, LinearLayout.LayoutParams(-2, -2))
-  layout.addView(room_header)
+  -- Top message limit bar (just like Notifications bar at top of main window)
+  local top_limit_bar = makeLayout(false, 2)
+  local btn_limit_100 = makeButton("100 Messages")
+  btn_limit_100.setContentDescription("Load 100 Messages")
+  local btn_limit_200 = makeButton("200 Messages")
+  btn_limit_200.setContentDescription("Load 200 Messages")
+
+  top_limit_bar.addView(btn_limit_100, LinearLayout.LayoutParams(0, -2, 1))
+  top_limit_bar.addView(btn_limit_200, LinearLayout.LayoutParams(0, -2, 1))
+  layout.addView(top_limit_bar, LinearLayout.LayoutParams(-1, -2))
+
+  local current_msg_limit = 60
 
   local lock_banner = makeText("Only admin and developer can send message this room", 13)
   lock_banner.setTextColor(0xFFD32F2F)
@@ -4149,13 +4200,16 @@ function openBtpVoiceRoomDialog()
 
   local loadRoomMessages
 
-  limit_btn.setOnClickListener(function()
-    limit_idx = limit_idx + 1
-    if limit_idx > #msg_limit_modes then limit_idx = 1 end
-    local lim_val = msg_limit_modes[limit_idx]
-    local lbl = (lim_val == 0) and "Msgs: All" or ("Msgs: " .. tostring(lim_val))
-    limit_btn.setText(lbl)
-    limit_btn.setContentDescription("Showing " .. (lim_val == 0 and "all messages" or (tostring(lim_val) .. " messages")))
+  btn_limit_100.setOnClickListener(function()
+    current_msg_limit = 100
+    top_limit_bar.setVisibility(View.GONE)
+    last_hash = ""
+    loadRoomMessages(true)
+  end)
+
+  btn_limit_200.setOnClickListener(function()
+    current_msg_limit = 200
+    top_limit_bar.setVisibility(View.GONE)
     last_hash = ""
     loadRoomMessages(true)
   end)
@@ -4188,8 +4242,8 @@ function openBtpVoiceRoomDialog()
     if not isNetworkAvailable() then return end
     http_get(FIREBASE_URL .. "user_presence.json", function(s, r)
       if not is_room_active or public_room_locked then return end
-      local count, names_str = getOnlineUsersSummary(s and r or nil)
-      local combined_title = "BTP Voice Room (" .. tostring(count) .. " online • " .. names_str .. ")"
+      local count = getOnlineUsersSummary(s and r or nil)
+      local combined_title = "BTP Voice Room (" .. tostring(count) .. " online)"
       title_tv.setText(combined_title)
       dialog.setTitle(combined_title)
     end)
@@ -4197,7 +4251,8 @@ function openBtpVoiceRoomDialog()
 
   loadRoomMessages = function(force_refresh)
     if not is_room_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. "btp_voice_room.json", function(success, response)
+    local max_show = current_msg_limit or 60
+    http_get(FIREBASE_URL .. 'btp_voice_room.json?orderBy="$key"&limitToLast=' .. tostring(max_show), function(success, response)
       if not is_room_active then return end
       local msg_list = {}
       local hash_builder = {}
@@ -4218,15 +4273,6 @@ function openBtpVoiceRoomDialog()
       table.sort(msg_list, function(a, b)
         return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
       end)
-
-      local max_show = msg_limit_modes[limit_idx] or 0
-      if max_show > 0 and #msg_list > max_show then
-        local sliced = {}
-        for i = (#msg_list - max_show + 1), #msg_list do
-          table.insert(sliced, msg_list[i])
-        end
-        msg_list = sliced
-      end
 
       local new_rx_on_mine = false
       for _, m in ipairs(msg_list) do
@@ -4584,13 +4630,9 @@ function openBtpVoiceRoomDialog()
 
   live_runnable = Runnable({
     run = function()
-      if is_room_active then
-        syncServerAndRoomSettings(function()
-          if is_room_active then
-            applyRoomLockAndOnlineState()
-            loadRoomMessages(false)
-          end
-        end)
+      if is_room_active and isAppForeground then
+        applyRoomLockAndOnlineState()
+        loadRoomMessages(false)
         live_handler.postDelayed(live_runnable, ROOM_POLL_INTERVAL_MS)
       end
     end
@@ -4635,7 +4677,7 @@ function openBtpVoiceRoomDialog()
 end
 
 -- ========================================================
--- GROUPS SYSTEM (200 CHAR DESC + CANCEL REQUEST + PIN MESSAGE + CLEAN NAME)
+-- GROUPS SYSTEM
 -- ========================================================
 
 function showCreateGroupDialog(onCreatedCallback)
@@ -5208,7 +5250,7 @@ function openGroupChatDialog(gid, group_data)
 
   local function loadGroupMessages(force_refresh)
     if not is_grp_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. "btp_group_messages/" .. gid .. ".json", function(success, response)
+    http_get(FIREBASE_URL .. "btp_group_messages/" .. gid .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
       if not is_grp_active then return end
       local msg_list = {}
       local hash_builder = {}
@@ -5672,13 +5714,9 @@ function openGroupChatDialog(gid, group_data)
 
   live_runnable = Runnable({
     run = function()
-      if is_grp_active then
-        syncServerAndRoomSettings(function()
-          if is_grp_active then
-            refreshGroupMetaAndOnline()
-            loadGroupMessages(false)
-          end
-        end)
+      if is_grp_active and isAppForeground then
+        refreshGroupMetaAndOnline()
+        loadGroupMessages(false)
         live_handler.postDelayed(live_runnable, ROOM_POLL_INTERVAL_MS)
       end
     end
@@ -5900,7 +5938,7 @@ function showGroupsListDialog()
 end
 
 -- ========================================================
--- CHAT HUB (MORE OPTIONS -> BTP ASSISTANT -> BTP VOICE ROOM -> VIEW GROUPS -> DIRECT CHATS)
+-- CHAT HUB
 -- ========================================================
 
 function showResourceChatDialog()
@@ -5960,214 +5998,102 @@ function showResourceChatDialog()
 
   syncServerAndRoomSettings(function()
     http_get(FIREBASE_URL .. "registered_users.json", function(s_reg, r_reg)
-      http_get(FIREBASE_URL .. "personal_chats.json", function(s_chats, r_chats)
-        http_get(FIREBASE_URL .. "user_presence.json", function(s_pres, r_pres)
-          users_container.removeAllViews()
+      http_get(FIREBASE_URL .. "user_presence.json", function(s_pres, r_pres)
+        users_container.removeAllViews()
 
-          local online_total, online_names_str = getOnlineUsersSummary(s_pres and r_pres or nil)
+        local online_total = getOnlineUsersSummary(s_pres and r_pres or nil)
 
-          local voice_room_card = makeLayout(true, 12)
-          voice_room_card.setBackgroundColor(0xFFE3F2FD)
-          local vr_title_str = "BTP Voice Room (" .. tostring(online_total) .. " online • " .. online_names_str .. ")"
-          if public_room_locked and not canBypassRoomLock(current_username) then
-            vr_title_str = "BTP Voice Room"
-          elseif public_room_locked then
-            vr_title_str = vr_title_str .. " • Locked"
-          end
-          local vr_title = makeText(vr_title_str, 16)
-          vr_title.setTextColor(0xFF0D47A1)
-          voice_room_card.addView(vr_title)
-          voice_room_card.addView(makeText("Public voice and text room for all members", 12))
-          users_container.addView(voice_room_card, LinearLayout.LayoutParams(-1, -2))
+        local voice_room_card = makeLayout(true, 12)
+        voice_room_card.setBackgroundColor(0xFFE3F2FD)
+        local vr_title_str = "BTP Voice Room (" .. tostring(online_total) .. " online)"
+        if public_room_locked and not canBypassRoomLock(current_username) then
+          vr_title_str = "BTP Voice Room"
+        elseif public_room_locked then
+          vr_title_str = vr_title_str .. " • Locked"
+        end
+        local vr_title = makeText(vr_title_str, 16)
+        vr_title.setTextColor(0xFF0D47A1)
+        voice_room_card.addView(vr_title)
+        voice_room_card.addView(makeText("Public voice and text room for all members", 12))
+        users_container.addView(voice_room_card, LinearLayout.LayoutParams(-1, -2))
 
-          voice_room_card.setOnClickListener(function()
-            dialog.dismiss()
-            openBtpVoiceRoomDialog()
-          end)
-
-          local groups_card = makeLayout(true, 12)
-          groups_card.setBackgroundColor(0xFFE8F5E9)
-          local grp_title = makeText("View Groups", 16)
-          grp_title.setTextColor(0xFF1B5E20)
-          groups_card.addView(grp_title)
-          users_container.addView(groups_card, LinearLayout.LayoutParams(-1, -2))
-
-          groups_card.setOnClickListener(function()
-            dialog.dismiss()
-            showGroupsListDialog()
-          end)
-
-          local user_map = {}
-          local user_last_msg_time = {}
-          local user_last_msg_data = {}
-          local user_unread_count = {}
-
-          if s_reg and r_reg and r_reg ~= "null" then
-            local ok, data = pcall(cjson.decode, r_reg)
-            if ok and type(data) == "table" then
-              for k, v in pairs(data) do
-                local uname = (type(v) == "table" and v.username) or k
-                local epoch = (type(v) == "table" and v.last_active_epoch) or 0
-                if uname and uname ~= "" then
-                  user_map[uname] = epoch
-                end
-              end
-            end
-          end
-
-          user_map["Ibrahim Ansari"] = user_map["Ibrahim Ansari"] or os.time()
-
-          if s_chats and r_chats and r_chats ~= "null" then
-            local ok, chats_data = pcall(cjson.decode, r_chats)
-            if ok and type(chats_data) == "table" then
-              for rkey, msgs in pairs(chats_data) do
-                if type(msgs) == "table" then
-                  for mid, m in pairs(msgs) do
-                    if type(m) == "table" then
-                      local other_u = nil
-                      if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() then
-                        other_u = m.receiver
-                      elseif trim(tostring(m.receiver or "")):lower() == trim(current_username):lower() then
-                        other_u = m.sender
-                      end
-                      
-                      if other_u and other_u ~= "" then
-                        if not user_map[other_u] then user_map[other_u] = 0 end
-                        if trim(tostring(m.receiver or "")):lower() == trim(current_username):lower() and m.status ~= "Read" then
-                          user_unread_count[other_u] = (user_unread_count[other_u] or 0) + 1
-                        end
-
-                        local t_raw = tostring(m.timestamp_raw or "0")
-                        if not user_last_msg_time[other_u] or t_raw > user_last_msg_time[other_u] then
-                          user_last_msg_time[other_u] = t_raw
-                          user_last_msg_data[other_u] = m
-                        end
-                      end
-                    end
-                  end
-                end
-              end
-            end
-          end
-
-          local user_list = {}
-          for u, _ in pairs(user_map) do
-            if trim(u):lower() ~= trim(current_username):lower() then
-              table.insert(user_list, u)
-            end
-          end
-
-          table.sort(user_list, function(a, b)
-            local ta = user_last_msg_time[a] or ""
-            local tb = user_last_msg_time[b] or ""
-            if ta ~= tb then return ta > tb end
-            local ep_a = tonumber(user_map[a] or 0)
-            local ep_b = tonumber(user_map[b] or 0)
-            if ep_a ~= ep_b then return ep_a > ep_b end
-            return tostring(a):lower() < tostring(b):lower()
-          end)
-
-          for _, u in ipairs(user_list) do
-            local card = makeLayout(true, 10)
-            card.setBackgroundColor(0xFFEEEEEE)
-            card.setPadding(14, 12, 14, 12)
-            card.setFocusable(true)
-            card.setClickable(true)
-
-            local last_m = user_last_msg_data[u]
-            local unread = user_unread_count[u] or 0
-
-            local top_row = makeLayout(false, 0)
-            local name_tv = makeText(getVerifiedName(u), 16)
-            name_tv.setTextColor(0xFF1E88E5)
-            top_row.addView(name_tv, LinearLayout.LayoutParams(0, -2, 1))
-
-            if last_m then
-              local time_text = getWhatsAppListTime(last_m.timestamp_raw, last_m.timestamp)
-              local time_tv = makeText(time_text, 12)
-              time_tv.setTextColor(0xFF777777)
-              top_row.addView(time_tv, LinearLayout.LayoutParams(-2, -2))
-            end
-            card.addView(top_row)
-
-            local notif_parts = {}
-            if unread > 0 then
-              table.insert(notif_parts, tostring(unread) .. " new message" .. (unread > 1 and "s" or ""))
-            end
-
-            local is_reply_to_me = false
-            if last_m and trim(tostring(last_m.sender or "")):lower() ~= trim(current_username):lower() and last_m.reply_to and type(last_m.reply_to) == "table" then
-              local rep_sender = trim(tostring(last_m.reply_to.sender or "")):lower()
-              if rep_sender == trim(current_username):lower() then
-                is_reply_to_me = true
-              end
-            end
-
-            local is_mentioned = false
-            if last_m and trim(tostring(last_m.sender or "")):lower() ~= trim(current_username):lower() and last_m.text then
-              local txt_lower = tostring(last_m.text):lower()
-              local my_name_lower = trim(current_username):lower()
-              if my_name_lower ~= "" and (txt_lower:find("@" .. my_name_lower, 1, true) or txt_lower:find(my_name_lower, 1, true)) then
-                is_mentioned = true
-              end
-            end
-
-            if unread > 0 then
-              if is_reply_to_me and is_mentioned then
-                table.insert(notif_parts, "Replied and mentioned you")
-              elseif is_reply_to_me then
-                table.insert(notif_parts, "Replied to your message")
-              elseif is_mentioned then
-                table.insert(notif_parts, "Mentioned you")
-              end
-            end
-
-            if #notif_parts > 0 then
-              local notif_line = makeText(table.concat(notif_parts, " • "), 12)
-              notif_line.setTextColor(0xFFD32F2F)
-              notif_line.setPadding(0, 2, 0, 2)
-              card.addView(notif_line)
-            end
-
-            if last_m then
-              local sender_tag = ""
-              if trim(tostring(last_m.sender or "")):lower() == trim(current_username):lower() then
-                sender_tag = "You: "
-              else
-                sender_tag = tostring(last_m.sender or "") .. ": "
-              end
-              local preview_txt = tostring(last_m.text or "")
-              if last_m.deleted_for_everyone == true or last_m.deleted_for_everyone == "true" then
-                preview_txt = "This message was deleted"
-              elseif last_m.msg_type == "voice" then
-                preview_txt = "Voice message (" .. tostring(last_m.audio_duration or "0") .. "s)"
-              elseif #preview_txt > 70 then
-                preview_txt = preview_txt:sub(1, 70) .. "..."
-              end
-              local msg_preview_tv = makeText(sender_tag .. preview_txt, 13)
-              msg_preview_tv.setTextColor(0xFF444444)
-              card.addView(msg_preview_tv)
-            else
-              local no_msg_tv = makeText("No messages yet. Tap to start chat.", 12)
-              no_msg_tv.setTextColor(0xFF888888)
-              card.addView(no_msg_tv)
-            end
-
-            users_container.addView(card, LinearLayout.LayoutParams(-1, -2))
-
-            card.setOnClickListener(function()
-              dialog.dismiss()
-              openPersonalChat(u)
-            end)
-          end
+        voice_room_card.setOnClickListener(function()
+          dialog.dismiss()
+          openBtpVoiceRoomDialog()
         end)
+
+        local groups_card = makeLayout(true, 12)
+        groups_card.setBackgroundColor(0xFFE8F5E9)
+        local grp_title = makeText("View Groups", 16)
+        grp_title.setTextColor(0xFF1B5E20)
+        groups_card.addView(grp_title)
+        users_container.addView(groups_card, LinearLayout.LayoutParams(-1, -2))
+
+        groups_card.setOnClickListener(function()
+          dialog.dismiss()
+          showGroupsListDialog()
+        end)
+
+        local user_map = {}
+
+        if s_reg and r_reg and r_reg ~= "null" then
+          local ok, data = pcall(cjson.decode, r_reg)
+          if ok and type(data) == "table" then
+            for k, v in pairs(data) do
+              local uname = (type(v) == "table" and v.username) or k
+              local epoch = (type(v) == "table" and v.last_active_epoch) or 0
+              if uname and uname ~= "" then
+                user_map[uname] = epoch
+              end
+            end
+          end
+        end
+
+        user_map["Ibrahim Ansari"] = user_map["Ibrahim Ansari"] or os.time()
+
+        local user_list = {}
+        for u, _ in pairs(user_map) do
+          if trim(u):lower() ~= trim(current_username):lower() then
+            table.insert(user_list, u)
+          end
+        end
+
+        table.sort(user_list, function(a, b)
+          local ep_a = tonumber(user_map[a] or 0)
+          local ep_b = tonumber(user_map[b] or 0)
+          if ep_a ~= ep_b then return ep_a > ep_b end
+          return tostring(a):lower() < tostring(b):lower()
+        end)
+
+        for _, u in ipairs(user_list) do
+          local card = makeLayout(true, 10)
+          card.setBackgroundColor(0xFFEEEEEE)
+          card.setPadding(14, 12, 14, 12)
+          card.setFocusable(true)
+          card.setClickable(true)
+
+          local name_tv = makeText(getVerifiedName(u), 16)
+          name_tv.setTextColor(0xFF1E88E5)
+          card.addView(name_tv)
+
+          local sub_tv = makeText("Tap to open personal chat & voice call", 12)
+          sub_tv.setTextColor(0xFF666666)
+          card.addView(sub_tv)
+
+          users_container.addView(card, LinearLayout.LayoutParams(-1, -2))
+
+          card.setOnClickListener(function()
+            dialog.dismiss()
+            openPersonalChat(u)
+          end)
+        end
       end)
     end)
   end)
 end
 
 -- ========================================================
--- ABOUT CODE DIALOG (WITH LIKED ALONG WITH SUMMARY & SOUND)
+-- ABOUT CODE DIALOG
 -- ========================================================
 
 local function formatCodeLikesSummary(likes_tbl)
@@ -6321,7 +6247,7 @@ function showAboutCodeDialog(item)
 end
 
 -- ========================================================
--- CODES FEED VIEW (HOME - RECENT CODES ALWAYS AT TOP)
+-- CODES FEED VIEW
 -- ========================================================
 
 local feed_container
@@ -6395,7 +6321,7 @@ end
 
 function loadCodesData()
   if not isNetworkAvailable() then return end
-  http_get(FIREBASE_URL .. "codes.json", function(success, response)
+  http_get(FIREBASE_URL .. 'codes.json?orderBy="$key"&limitToLast=60', function(success, response)
     all_codes_data = {}
     if success and response and response ~= "null" then
       local ok, data = pcall(cjson.decode, response)
@@ -6597,7 +6523,7 @@ function createMyUploadsView()
 end
 
 -- ========================================================
--- GROUP MANAGEMENT DIALOG (VERIFIED ONLY BAN / UNBAN / DELETE)
+-- GROUP MANAGEMENT DIALOG
 -- ========================================================
 
 local function showGroupManagementDialog()
@@ -6693,7 +6619,7 @@ local function showGroupManagementDialog()
 end
 
 -- ========================================================
--- ADMIN PANEL DIALOG (FULL FOR VERIFIED/DEV, BROADCAST ONLY FOR ADMIN)
+-- ADMIN PANEL DIALOG
 -- ========================================================
 
 function showAdminPanelDialog()
@@ -7065,7 +6991,7 @@ function showNotificationPrivacyDialog()
   local notif_sound_status = sp.getBoolean("notif_sound_enabled", false)
   local share_presence_status = sp.getBoolean("share_presence_enabled", true)
 
-  local notif_toggle_btn = makeButton("Background Notifications: " .. (notif_sound_status and "ENABLED ON" or "DISABLED OFF"))
+  local notif_toggle_btn = makeButton("Notifications Sound (In-App): " .. (notif_sound_status and "ENABLED ON" or "DISABLED OFF"))
   local presence_toggle_btn = makeButton("Show Online / Last Seen: " .. (share_presence_status and "VISIBLE ON" or "HIDDEN OFF"))
 
   layout.addView(makeText("Configure sound alerts and online visibility:", 13))
@@ -7084,13 +7010,13 @@ function showNotificationPrivacyDialog()
     local current = sp.getBoolean("notif_sound_enabled", false)
     local new_val = not current
     sp.edit().putBoolean("notif_sound_enabled", new_val).apply()
-    notif_toggle_btn.setText("Background Notifications: " .. (new_val and "ENABLED ON" or "DISABLED OFF"))
+    notif_toggle_btn.setText("Notifications Sound (In-App): " .. (new_val and "ENABLED ON" or "DISABLED OFF"))
     if new_val then
       startBackgroundNotificationWatcher()
-      showToast("Background notification enabled.")
+      showToast("Notification alerts enabled.")
     else
       stopBackgroundNotificationWatcher()
-      showToast("Background notification turned off.")
+      showToast("Notification alerts turned off.")
     end
   end)
 
@@ -7110,11 +7036,12 @@ function showNotificationPrivacyDialog()
 end
 
 -- ========================================================
--- SETTINGS VIEW (CHECK FOR UPDATE + ADMIN PANEL FOR VERIFIED & ADMIN USERS)
+-- SETTINGS VIEW
 -- ========================================================
 
 function createSettingsView()
   local layout = makeLayout(true, 20)
+  CURRENT_VERSION = getCurrentAppVersion()
 
   local check_update_btn = makeButton("Check for Update (Current: " .. CURRENT_VERSION .. ")")
   check_update_btn.setContentDescription("Check for Update")
@@ -7208,6 +7135,7 @@ function createSettingsView()
   end)
 
   about_app.setOnClickListener(function()
+    CURRENT_VERSION = getCurrentAppVersion()
     showMessage(
       "About This App",
       APP_TITLE .. "\n" .. APP_DEV .. "\nVersion: " .. CURRENT_VERSION .. "\n\n"
@@ -7318,39 +7246,48 @@ function initMainWindow()
 end
 
 -- ========================================================
--- LIFECYCLE HOOKS: ZERO BACKGROUND RUNTIME OUTSIDE APP
+-- LIFECYCLE HOOKS: ZERO BACKGROUND NETWORK/DATA USAGE
 -- ========================================================
 
-function onStop()
-  stopActiveVoicePlayer(false)
+function onPause()
+  isAppForeground = false
   stopBackgroundNotificationWatcher()
-  resetCallAudioMode()
-  if presence_handler and presence_runnable then
-    pcall(function() presence_handler.removeCallbacks(presence_runnable) end)
-    presence_handler = nil
-    presence_runnable = nil
+  stopIncomingCallWatcher()
+  stopPresenceTracking()
+end
+
+function onResume()
+  isAppForeground = true
+  if current_username ~= "" then
+    startPresenceTracking()
+    startIncomingCallWatcher()
+    if sp.getBoolean("notif_sound_enabled", false) then
+      startBackgroundNotificationWatcher()
+    end
   end
 end
 
-function onDestroy()
+function onStop()
+  isAppForeground = false
   stopActiveVoicePlayer(false)
   stopBackgroundNotificationWatcher()
+  stopIncomingCallWatcher()
+  stopPresenceTracking()
   resetCallAudioMode()
-  if incoming_call_handler and incoming_call_runnable then
-    pcall(function() incoming_call_handler.removeCallbacks(incoming_call_runnable) end)
-    incoming_call_handler = nil
-    incoming_call_runnable = nil
-  end
-  if presence_handler and presence_runnable then
-    pcall(function() presence_handler.removeCallbacks(presence_runnable) end)
-    presence_handler = nil
-    presence_runnable = nil
-  end
+end
+
+function onDestroy()
+  isAppForeground = false
+  stopActiveVoicePlayer(false)
+  stopBackgroundNotificationWatcher()
+  stopIncomingCallWatcher()
+  stopPresenceTracking()
+  resetCallAudioMode()
   updatePresence("offline")
 end
 
 -- ========================================================
--- STARTUP SEQUENCE (ZERO HANG - ASYNC INIT)
+-- STARTUP SEQUENCE
 -- ========================================================
 
 if current_username == "" then
