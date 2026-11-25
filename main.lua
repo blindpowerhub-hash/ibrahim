@@ -9,6 +9,7 @@ import "android.net.*"
 import "android.net.Uri"
 import "android.net.ConnectivityManager"
 import "android.util.Base64"
+import "android.webkit.*"
 import "java.util.ArrayList"
 import "java.util.HashMap"
 import "cjson"
@@ -61,7 +62,7 @@ local APP_TITLE = "all open source by blind Tech power hub"
 local APP_DEV = "Developer: Ibrahim Ansari"
 local FIREBASE_URL = "https://ibrahim-6e4a3-default-rtdb.firebaseio.com/"
 
-local DEFAULT_VERSION = "1.31.2"
+local DEFAULT_VERSION = "1.32.0"
 local VERSION_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/virgin.txt"
 local UPDATE_CODE_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/main.lua"
 local UPDATE_NOTE_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ibrahim/main/note.txt"
@@ -69,6 +70,7 @@ local UPDATE_NOTE_URL = "https://raw.githubusercontent.com/blindpowerhub-hash/ib
 local SOUND_BASE_DIR = "/storage/emulated/0/解说/Tools/all open source by blind Tech power hub. /allopensourcebyblindTechpowerhub/"
 
 local sp = activity.getSharedPreferences("BTP_USER_PREFS", Context.MODE_PRIVATE)
+local cache_sp = activity.getSharedPreferences("BTP_OFFLINE_CACHE", Context.MODE_PRIVATE)
 local update_prefs = activity.getSharedPreferences("AutoUpdatePrefs", Context.MODE_PRIVATE)
 local current_username = tostring(sp.getString("username", ""))
 
@@ -147,9 +149,9 @@ local updateDismissedThisSession = false
 local isAppForeground = true
 
 local MAX_VOICE_SECONDS = 45
-local CHAT_POLL_INTERVAL_MS = 8000
-local ROOM_POLL_INTERVAL_MS = 8000
-local CALL_POLL_INTERVAL_MS = 3000
+local CHAT_POLL_INTERVAL_MS = 6000
+local ROOM_POLL_INTERVAL_MS = 6000
+local CALL_POLL_INTERVAL_MS = 2500
 local CALL_RING_TIMEOUT_SEC = 35
 
 local all_codes_data = {}
@@ -199,6 +201,28 @@ local current_voice_playlist = {}
 local current_voice_playlist_index = -1
 
 -- ========================================================
+-- OFFLINE CACHE & LOCAL STORAGE HELPERS
+-- ========================================================
+
+local function saveOfflineCache(cache_key, raw_str)
+  if cache_key and raw_str and raw_str ~= "" and raw_str ~= "null" then
+    pcall(function()
+      cache_sp.edit().putString(tostring(cache_key), tostring(raw_str)).apply()
+    end)
+  end
+end
+
+local function loadOfflineCache(cache_key)
+  local ok, val = pcall(function()
+    return tostring(cache_sp.getString(tostring(cache_key), ""))
+  end)
+  if ok and val and val ~= "" then
+    return val
+  end
+  return nil
+end
+
+-- ========================================================
 -- SOUND PATHS & MEDIA / TONE HELPERS
 -- ========================================================
 
@@ -241,7 +265,7 @@ local function isNetworkAvailable()
     local netInfo = cm.getActiveNetworkInfo()
     return (netInfo ~= nil and netInfo.isConnected())
   end)
-  if ok then return res else return true end
+  if ok then return res else return false end
 end
 
 local function playSound(path, on_done_cb, fallback_tone, looping)
@@ -714,7 +738,6 @@ function checkUpdate(manualCheck)
       local alreadyInstalled = tostring(update_prefs.getString("installed_app_version", ""))
 
       if onlineVersion ~= "" and onlineVersion ~= CURRENT_VERSION and onlineVersion ~= alreadyInstalled then
-        -- Fetch optional release notes from note.txt before showing update dialog
         Http.get(UPDATE_NOTE_URL .. "?t=" .. timestamp, nil, "utf-8", nil, function(noteCode, noteResp)
           local noteStr = ""
           if noteCode == 200 and noteResp then
@@ -1236,12 +1259,18 @@ end
 
 local function loadVerifiedUsers(callback)
   if not isNetworkAvailable() then
+    local cached = loadOfflineCache("verified_users")
+    if cached then
+      local ok, data = pcall(cjson.decode, cached)
+      if ok and type(data) == "table" then verified_users_map = data end
+    end
     if callback then callback() end
     return
   end
   Http.get(FIREBASE_URL .. "verified_users.json", nil, "utf-8", nil, function(code, content)
     verified_users_map = {}
     if code == 200 and content and content ~= "null" then
+      saveOfflineCache("verified_users", content)
       local ok, data = pcall(cjson.decode, content)
       if ok and type(data) == "table" then
         verified_users_map = data
@@ -1253,12 +1282,18 @@ end
 
 local function loadAdminUsers(callback)
   if not isNetworkAvailable() then
+    local cached = loadOfflineCache("admin_users")
+    if cached then
+      local ok, data = pcall(cjson.decode, cached)
+      if ok and type(data) == "table" then admin_users_map = data end
+    end
     if callback then callback() end
     return
   end
   Http.get(FIREBASE_URL .. "admin_users.json", nil, "utf-8", nil, function(code, content)
     admin_users_map = {}
     if code == 200 and content and content ~= "null" then
+      saveOfflineCache("admin_users", content)
       local ok, data = pcall(cjson.decode, content)
       if ok and type(data) == "table" then
         admin_users_map = data
@@ -1287,11 +1322,21 @@ end
 
 local function syncServerAndRoomSettings(callback)
   if not isNetworkAvailable() then
+    local cached = loadOfflineCache("server_settings")
+    if cached then
+      local ok, sdata = pcall(cjson.decode, cached)
+      if ok and type(sdata) == "table" then
+        server_is_down = (sdata.server_down == true or sdata.server_down == "true")
+        public_room_locked = (sdata.public_room_locked == true or sdata.public_room_locked == "true")
+        assistant_is_locked = (sdata.assistant_locked == true or sdata.assistant_locked == "true")
+      end
+    end
     if callback then callback() end
     return
   end
   Http.get(FIREBASE_URL .. "settings.json", nil, "utf-8", nil, function(code, content)
     if code == 200 and content and content ~= "null" then
+      saveOfflineCache("server_settings", content)
       local ok, sdata = pcall(cjson.decode, content)
       if ok and type(sdata) == "table" then
         server_is_down = (sdata.server_down == true or sdata.server_down == "true")
@@ -1332,18 +1377,6 @@ local function getDayLabelFromRaw(timestamp_raw)
     local months = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
     return string.format("%02d %s %s", d, months[m] or "Jan", y)
   end
-end
-
-local function getWhatsAppListTime(timestamp_raw, timestamp_str)
-  local day_lbl = getDayLabelFromRaw(timestamp_raw)
-  if day_lbl == "Today" then
-    return tostring(timestamp_str or "Today")
-  elseif day_lbl == "Yesterday" then
-    return "Yesterday"
-  elseif day_lbl ~= "" then
-    return day_lbl
-  end
-  return tostring(timestamp_str or "")
 end
 
 -- ========================================================
@@ -1458,6 +1491,9 @@ local function startPresenceTracking()
 end
 
 local function getOnlineUsersSummary(presence_json_str)
+  if not isNetworkAvailable() then
+    return 0, "", {}
+  end
   local online_names = {}
   if presence_json_str and presence_json_str ~= "null" then
     local ok_p, pdata = pcall(cjson.decode, presence_json_str)
@@ -1479,7 +1515,7 @@ local function getOnlineUsersSummary(presence_json_str)
     end
   end
 
-  if current_username ~= "" then
+  if current_username ~= "" and isNetworkAvailable() then
     local my_low = trim(current_username):lower()
     local has_me = false
     for _, n in ipairs(online_names) do
@@ -1491,13 +1527,12 @@ local function getOnlineUsersSummary(presence_json_str)
   end
 
   local cnt = #online_names
-  if cnt < 1 then cnt = 1 end
   local names_str = table.concat(online_names, ", ")
   return cnt, names_str, online_names
 end
 
 -- ========================================================
--- VOICE CALL ENGINE
+-- REAL-TIME LIVE MICROPHONE VOICE CALL ENGINE (WEBVIEW WEBRTC)
 -- ========================================================
 
 local function setCallAudioMode(speaker_on, muted)
@@ -1539,16 +1574,153 @@ local function isUserCurrentlyOnline(target_name, callback)
   end)
 end
 
-local function sendVoicePacketInCall(call_id, duration_sec, file_path)
-  local b64 = encodeFileToBase64(file_path)
-  if not b64 or b64 == "" then return end
-  local pkt = {
-    sender = current_username,
-    duration = duration_sec,
-    audio_base64 = b64,
-    timestamp_raw = os.date("%Y%m%d%H%M%S")
+local function buildLiveWebRtcCallHtml(call_id, my_user, fb_base)
+  local safe_cid = tostring(call_id):gsub("[^%w_]", "_")
+  local safe_me = tostring(my_user):gsub("[^%w_]", "_")
+  return [[
+<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:sans-serif;background:#E8F5E9;color:#1B5E20;padding:8px;margin:0;border-radius:6px;">
+<div id="rtcStatus" style="font-size:13px;font-weight:bold;">Initializing Live Real-Time Microphone...</div>
+<div id="remoteAudios"></div>
+<script>
+const CALL_ID = "]] .. safe_cid .. [[";
+const MY_ID = "]] .. safe_me .. [[";
+const FB_URL = "]] .. fb_base .. [[voice_calls/" + CALL_ID + "/webrtc_signals";
+let localStream = null;
+let isMuted = false;
+let peers = {};
+let seenSignals = {};
+let pollTimer = null;
+
+function setStatus(txt) {
+  const el = document.getElementById("rtcStatus");
+  if (el) el.innerText = txt;
+}
+
+window.setMicMuteState = function(m) {
+  isMuted = !!m;
+  if (localStream) {
+    localStream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
   }
-  http_post_or_put(FIREBASE_URL .. "voice_calls/" .. call_id .. "/packets.json", "POST", pkt, function() end)
+  setStatus(isMuted ? "Live Mic: Muted" : "Live Mic: Active (Real-Time Audio)");
+};
+
+window.stopLiveWebRtc = function() {
+  if (pollTimer) clearInterval(pollTimer);
+  Object.values(peers).forEach(pc => { try { pc.close(); } catch(e){} });
+  peers = {};
+  if (localStream) {
+    localStream.getTracks().forEach(t => { try { t.stop(); } catch(e){} });
+    localStream = null;
+  }
+};
+
+function sendSignal(toUser, payload) {
+  fetch(FB_URL + "/" + encodeURIComponent(toUser) + ".json", {
+    method: "POST",
+    body: JSON.stringify(Object.assign({ from: MY_ID, ts: Date.now() }, payload))
+  }).catch(()=>{});
+}
+
+function createPeer(remoteUser, isInitiator) {
+  if (peers[remoteUser]) return peers[remoteUser];
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+    ]
+  });
+  peers[remoteUser] = pc;
+
+  if (localStream) {
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  }
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      sendSignal(remoteUser, { type: "candidate", candidate: e.candidate });
+    }
+  };
+
+  pc.ontrack = (e) => {
+    let aud = document.getElementById("aud_" + remoteUser);
+    if (!aud) {
+      aud = document.createElement("audio");
+      aud.id = "aud_" + remoteUser;
+      aud.autoplay = true;
+      aud.playsInline = true;
+      document.getElementById("remoteAudios").appendChild(aud);
+    }
+    aud.srcObject = e.streams[0];
+    aud.play().catch(()=>{});
+    setStatus("Live Voice Connected (Real-Time Audio Active)");
+  };
+
+  if (isInitiator) {
+    pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+      sendSignal(remoteUser, { type: "offer", sdp: pc.localDescription });
+    }).catch(()=>{});
+  }
+  return pc;
+}
+
+async function pollSignals() {
+  try {
+    const res = await fetch(FB_URL + "/" + encodeURIComponent(MY_ID) + ".json");
+    const data = await res.json();
+    if (!data) return;
+    for (const [k, sig] of Object.entries(data)) {
+      if (seenSignals[k] || !sig || !sig.from || sig.from === MY_ID) continue;
+      seenSignals[k] = true;
+      fetch(FB_URL + "/" + encodeURIComponent(MY_ID) + "/" + k + ".json", { method: "DELETE" }).catch(()=>{});
+
+      if (sig.type === "join") {
+        createPeer(sig.from, true);
+      } else if (sig.type === "offer") {
+        const pc = createPeer(sig.from, false);
+        await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        sendSignal(sig.from, { type: "answer", sdp: pc.localDescription });
+      } else if (sig.type === "answer") {
+        const pc = peers[sig.from];
+        if (pc) await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+      } else if (sig.type === "candidate") {
+        const pc = peers[sig.from];
+        if (pc && sig.candidate) await pc.addIceCandidate(new RTCIceCandidate(sig.candidate));
+      }
+    }
+  } catch (err) {}
+}
+
+(async function start() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false
+    });
+    setStatus("Live Mic: Active (Real-Time Audio)");
+    const pRes = await fetch("]] .. fb_base .. [[voice_calls/" + CALL_ID + "/participants.json");
+    const parts = await pRes.json();
+    if (parts) {
+      Object.values(parts).forEach(pName => {
+        const cleanP = String(pName).replace(/[^a-zA-Z0-9_]/g, "_");
+        if (cleanP && cleanP !== MY_ID) {
+          sendSignal(cleanP, { type: "join" });
+        }
+      });
+    }
+    pollTimer = setInterval(pollSignals, 1500);
+  } catch (e) {
+    setStatus("Live Mic Ready (Grant Microphone Permission if prompted)");
+  }
+})();
+</script>
+</body>
+</html>
+]]
 end
 
 function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop)
@@ -1562,13 +1734,30 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
   local call_type = tostring(initial_call_data.call_type or "direct")
   local call_label = tostring(initial_call_data.title or initial_call_data.target or "Voice Call")
 
-  local status_tv = makeText("Connecting voice call with " .. call_label .. "...", 15)
+  local status_tv = makeText("Connecting real-time voice call with " .. call_label .. "...", 15)
   status_tv.setTextColor(0xFF0D47A1)
   layout.addView(status_tv)
 
   local participants_tv = makeText("Participants: Loading...", 13)
-  participants_tv.setPadding(0, 6, 0, 10)
+  participants_tv.setPadding(0, 6, 0, 8)
   layout.addView(participants_tv)
+
+  -- Live WebView Real-Time Microphone Engine (No Walkie-Talkie / No Tap-to-Speak)
+  local rtc_webview = WebView(activity)
+  pcall(function()
+    local ws = rtc_webview.getSettings()
+    ws.setJavaScriptEnabled(true)
+    ws.setDomStorageEnabled(true)
+    ws.setMediaPlaybackRequiresUserGesture(false)
+    rtc_webview.setWebChromeClient(WebChromeClient{
+      onPermissionRequest = function(req)
+        pcall(function() req.grant(req.getResources()) end)
+      end
+    })
+    local html_code = buildLiveWebRtcCallHtml(call_id, current_username, FIREBASE_URL)
+    rtc_webview.loadDataWithBaseURL("https://blindtechpowerhub.local/", html_code, "text/html", "UTF-8", nil)
+  end)
+  layout.addView(rtc_webview, LinearLayout.LayoutParams(-1, 80))
 
   local ctrl_row_1 = makeLayout(false, 4)
   local mute_btn = makeButton("Mute Microphone")
@@ -1579,12 +1768,8 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
   ctrl_row_1.addView(speaker_btn, LinearLayout.LayoutParams(0, -2, 1))
   layout.addView(ctrl_row_1)
 
-  local ctrl_row_2 = makeLayout(false, 4)
   local add_person_btn = makeButton("Add Person to Call")
-  local push_voice_btn = makeButton("Tap to Speak Voice")
-  ctrl_row_2.addView(add_person_btn, LinearLayout.LayoutParams(0, -2, 1))
-  ctrl_row_2.addView(push_voice_btn, LinearLayout.LayoutParams(0, -2, 1))
-  layout.addView(ctrl_row_2)
+  layout.addView(add_person_btn, LinearLayout.LayoutParams(-1, -2))
 
   local end_call_btn = makeButton("End Call")
   end_call_btn.setBackgroundColor(0xFFD32F2F)
@@ -1592,7 +1777,7 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
   layout.addView(end_call_btn, LinearLayout.LayoutParams(-1, -2))
 
   local dialog = AlertDialog.Builder(activity)
-    .setTitle("Voice Call - " .. call_label)
+    .setTitle("Live Voice Call - " .. call_label)
     .setView(layout)
     .setCancelable(false)
     .create()
@@ -1604,14 +1789,6 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
   local call_opened_epoch = os.time()
   local poll_handler = Handler(Looper.getMainLooper())
   local poll_runnable = nil
-  local seen_pkt_ids = {}
-  local call_start_ts = os.date("%Y%m%d%H%M%S")
-  local is_recording_burst = false
-  local burst_recorder = nil
-  local burst_sec = 0
-  local burst_timer_h = Handler(Looper.getMainLooper())
-  local burst_timer_r = nil
-  local burst_path = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_call_burst.m4a"
 
   local dial_loop_mp = nil
   local dial_stop_handler = Handler(Looper.getMainLooper())
@@ -1655,17 +1832,10 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
     active_call_dialog = nil
     active_call_id = nil
     active_call_is_muted = false
-    if burst_timer_r then
-      pcall(function() burst_timer_h.removeCallbacks(burst_timer_r) end)
-      burst_timer_r = nil
-    end
-    if burst_recorder then
-      pcall(function()
-        burst_recorder.stop()
-        burst_recorder.release()
-      end)
-      burst_recorder = nil
-    end
+    pcall(function()
+      rtc_webview.evaluateJavascript("if(window.stopLiveWebRtc) window.stopLiveWebRtc();", nil)
+      rtc_webview.destroy()
+    end)
     if poll_runnable then
       pcall(function() poll_handler.removeCallbacks(poll_runnable) end)
       poll_runnable = nil
@@ -1692,6 +1862,9 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
   mute_btn.setOnClickListener(function()
     active_call_is_muted = not active_call_is_muted
     setCallAudioMode(active_call_speaker_on, active_call_is_muted)
+    pcall(function()
+      rtc_webview.evaluateJavascript("if(window.setMicMuteState) window.setMicMuteState(" .. tostring(active_call_is_muted) .. ");", nil)
+    end)
     local mLbl = active_call_is_muted and "Unmute Microphone" or "Mute Microphone"
     mute_btn.setText(mLbl)
     mute_btn.setContentDescription(mLbl)
@@ -1705,61 +1878,7 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
     local sLbl = active_call_speaker_on and "Speaker Off" or "Speaker On"
     speaker_btn.setText(sLbl)
     speaker_btn.setContentDescription(sLbl)
-    showToast(active_call_speaker_on and "Earpiece mode." or "Speaker on.")
-  end)
-
-  local function finishSpeakBurst()
-    is_recording_burst = false
-    push_voice_btn.setText("Tap to Speak Voice")
-    if burst_timer_r then
-      pcall(function() burst_timer_h.removeCallbacks(burst_timer_r) end)
-      burst_timer_r = nil
-    end
-    local sec = burst_sec > 0 and burst_sec or 1
-    burst_sec = 0
-    if burst_recorder then
-      pcall(function()
-        burst_recorder.stop()
-        burst_recorder.release()
-      end)
-      burst_recorder = nil
-    end
-    sendVoicePacketInCall(call_id, sec, burst_path)
-  end
-
-  push_voice_btn.setOnClickListener(function()
-    if active_call_is_muted then
-      showToast("Unmute microphone first to speak.")
-      return
-    end
-    if not is_recording_burst then
-      local f = File(burst_path)
-      if f.exists() then f.delete() end
-      burst_recorder = startHighClarityRecording(burst_path)
-      if not burst_recorder then
-        showToast("Microphone unavailable.")
-        return
-      end
-      is_recording_burst = true
-      burst_sec = 0
-      push_voice_btn.setText("Send Voice Now (0s)")
-      burst_timer_r = Runnable({
-        run = function()
-          if is_recording_burst and call_active then
-            burst_sec = burst_sec + 1
-            push_voice_btn.setText("Send Voice Now (" .. tostring(burst_sec) .. "s)")
-            if burst_sec >= 15 then
-              finishSpeakBurst()
-            else
-              burst_timer_h.postDelayed(burst_timer_r, 1000)
-            end
-          end
-        end
-      })
-      burst_timer_h.postDelayed(burst_timer_r, 1000)
-    else
-      finishSpeakBurst()
-    end
+    showToast(active_call_speaker_on and "Speaker on." or "Earpiece mode.")
   end)
 
   add_person_btn.setOnClickListener(function()
@@ -1797,7 +1916,7 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
               local invite_user = online_candidates[w + 1]
               http_post_or_put(FIREBASE_URL .. "voice_calls/" .. call_id .. "/invited/" .. encodeKey(invite_user) .. ".json", "PUT", invite_user, function()
                 http_post_or_put(FIREBASE_URL .. "voice_calls/" .. call_id .. "/participants/" .. encodeKey(invite_user) .. ".json", "PUT", invite_user, function()
-                  showToast("Added " .. invite_user .. " to call!")
+                  showToast("Added " .. invite_user .. " to live call!")
                 end)
               end)
             end
@@ -1806,7 +1925,7 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
     end)
   end)
 
-  local function refreshCallStateAndAudio()
+  local function refreshCallState()
     if not call_active or not isNetworkAvailable() then return end
     http_get(FIREBASE_URL .. "voice_calls/" .. call_id .. ".json", function(s, r)
       if not call_active then return end
@@ -1845,55 +1964,23 @@ function openActiveCallSessionDialog(call_id, initial_call_data, start_dial_loop
       if #part_names == 0 then
         table.insert(part_names, current_username)
       end
-      participants_tv.setText("In Call: " .. table.concat(part_names, ", "))
+      participants_tv.setText("In Live Call: " .. table.concat(part_names, ", "))
 
       if c_status == "active" or call_type == "room_live" then
         triggerConnectedSoundOnce()
-        status_tv.setText("Connected (" .. call_label .. ")")
+        status_tv.setText("Live Connected (" .. call_label .. ")")
       else
         status_tv.setText("Ringing " .. call_label .. "...")
-      end
-
-      if type(cdata.packets) == "table" then
-        local sorted_pkts = {}
-        for pid, pkt in pairs(cdata.packets) do
-          if type(pkt) == "table" then
-            pkt.id = pid
-            table.insert(sorted_pkts, pkt)
-          end
-        end
-        table.sort(sorted_pkts, function(a, b)
-          return tostring(a.timestamp_raw or "") < tostring(b.timestamp_raw or "")
-        end)
-        for _, pkt in ipairs(sorted_pkts) do
-          if not seen_pkt_ids[pkt.id] then
-            seen_pkt_ids[pkt.id] = true
-            if trim(tostring(pkt.sender or "")):lower() ~= trim(current_username):lower() and tostring(pkt.timestamp_raw or "") >= call_start_ts then
-              local out_p = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_cpkt_" .. tostring(pkt.id):gsub("[^%w_]", "_") .. ".m4a"
-              if decodeBase64ToFile(pkt.audio_base64, out_p) then
-                pcall(function()
-                  local mp = MediaPlayer()
-                  mp.setDataSource(out_p)
-                  mp.prepare()
-                  mp.start()
-                  mp.setOnCompletionListener(MediaPlayer.OnCompletionListener{
-                    onCompletion = function(m) pcall(function() m.release() end) end
-                  })
-                end)
-              end
-            end
-          end
-        end
       end
     end)
   end
 
-  refreshCallStateAndAudio()
+  refreshCallState()
 
   poll_runnable = Runnable({
     run = function()
       if call_active then
-        refreshCallStateAndAudio()
+        refreshCallState()
         poll_handler.postDelayed(poll_runnable, CALL_POLL_INTERVAL_MS)
       end
     end
@@ -2029,8 +2116,8 @@ local function startIncomingCallWatcher()
                           end
 
                           local call_prompt_msg = (ctype == "group")
-                            and ("Incoming Group Call from " .. getVerifiedName(caller_name) .. " in group: " .. ctitle)
-                            or ("Incoming Voice Call from " .. getVerifiedName(caller_name))
+                            and ("Incoming Live Group Call from " .. getVerifiedName(caller_name) .. " in group: " .. ctitle)
+                            or ("Incoming Live Voice Call from " .. getVerifiedName(caller_name))
 
                           AlertDialog.Builder(activity)
                             .setTitle(ctype == "group" and "Incoming Group Call" or "Incoming Voice Call")
@@ -2069,15 +2156,15 @@ local function startIncomingCallWatcher()
       end
 
       if isAppForeground and incoming_call_handler and incoming_call_runnable then
-        incoming_call_handler.postDelayed(incoming_call_runnable, 12000)
+        incoming_call_handler.postDelayed(incoming_call_runnable, 10000)
       end
     end
   })
-  incoming_call_handler.postDelayed(incoming_call_runnable, 6000)
-end
+  incoming_call_handler.postDelayed(incoming_call_runnable, 5000)
+endend
 
 -- ========================================================
--- BTP ASSISTANT ENGINE
+-- BTP ASSISTANT ENGINE & PERSONAL AUTO-REPLY SYSTEM
 -- ========================================================
 
 local assistantTaskCounter = 0
@@ -2097,6 +2184,14 @@ local function stripAssistantMarkdownEmojis(str)
   s = s:gsub("[\240-\244][\128-\191][\128-\191][\128-\191]", "")
   s = s:gsub("[%*%#`_~]", " ")
   s = s:gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+  return s
+end
+
+local function enforceBtpAssistantIdentity(replyStr)
+  local s = tostring(replyStr or "")
+  s = s:gsub("[Cc][Hh][Aa][Tt]%s*[Gg][Pp][Tt]", "BTP Assistant")
+  s = s:gsub("[Oo][Pp][Ee][Nn]%s*[Aa][Ii]", "Blind Tech Power Hub")
+  s = s:gsub("[Gg][Pp][Tt]%-%d+[%w%.]*", "BTP Assistant")
   return s
 end
 
@@ -2175,13 +2270,20 @@ local function generateAssistantSpeechFile(text, langCode, outPath, callback)
   end, tId, joined, tl, outPath)
 end
 
-local function buildTrainedKnowledgeContext(queryStr)
-  if type(assistant_trained_items) ~= "table" or #assistant_trained_items == 0 then
+local function buildTrainedKnowledgeContext(queryStr, extra_list)
+  local combined = {}
+  if type(extra_list) == "table" then
+    for _, it in ipairs(extra_list) do table.insert(combined, it) end
+  end
+  if type(assistant_trained_items) == "table" then
+    for _, it in ipairs(assistant_trained_items) do table.insert(combined, it) end
+  end
+  if #combined == 0 then
     return ""
   end
   local qLow = trim(tostring(queryStr or "")):lower()
   local out = {}
-  for _, it in ipairs(assistant_trained_items) do
+  for _, it in ipairs(combined) do
     local kLow = trim(tostring(it.q or "")):lower()
     if kLow ~= "" and (qLow == "" or qLow:find(kLow, 1, true) or kLow:find(qLow, 1, true)) then
       table.insert(out, tostring(it.q or "") .. ": " .. tostring(it.a or ""))
@@ -2189,17 +2291,27 @@ local function buildTrainedKnowledgeContext(queryStr)
     end
   end
   if #out == 0 then
-    for i = 1, math.min(2, #assistant_trained_items) do
-      local it = assistant_trained_items[i]
+    for i = 1, math.min(2, #combined) do
+      local it = combined[i]
       table.insert(out, tostring(it.q or "") .. ": " .. tostring(it.a or ""))
     end
   end
   return table.concat(out, " | ")
 end
 
-local function findLocalTrainedAnswer(queryStr)
+local function findLocalTrainedAnswer(queryStr, extra_list)
   local qLow = trim(tostring(queryStr or "")):lower()
   if qLow == "" then return nil end
+
+  if type(extra_list) == "table" then
+    for _, item in ipairs(extra_list) do
+      local kLow = trim(tostring(item.q or "")):lower()
+      if kLow ~= "" and (qLow == kLow or qLow:find(kLow, 1, true)) then
+        return tostring(item.a or "")
+      end
+    end
+  end
+
   for _, item in ipairs(assistant_trained_items) do
     local kLow = trim(tostring(item.q or "")):lower()
     if kLow ~= "" and (qLow == kLow or qLow:find(kLow, 1, true)) then
@@ -2209,8 +2321,8 @@ local function findLocalTrainedAnswer(queryStr)
 
   if qLow == "hi" or qLow == "hello" or qLow == "namaste" or qLow == "salam" or qLow == "assalamualaikum" then
     return "Namaste " .. ((current_username ~= "" and current_username) or "Dost") .. "! Main BTP Assistant hoon. Aap mujhse AndroLua code, app features, ya koi bhi sawal poochh sakte hain."
-  elseif qLow:find("tum kaun ho", 1, true) or qLow:find("who are you", 1, true) or qLow:find("apna naam", 1, true) then
-    return "Main BTP Assistant hoon, jise Ibrahim Ansari ne Blind Tech Power Hub ke liye banaya hai."
+  elseif qLow:find("tum kaun ho", 1, true) or qLow:find("who are you", 1, true) or qLow:find("apna naam", 1, true) or qLow:find("your name", 1, true) or qLow:find("tumhara naam", 1, true) or qLow:find("naam kya", 1, true) then
+    return "Mera naam BTP Assistant hai. Mujhe Ibrahim Ansari ne Blind Tech Power Hub ke liye banaya hai."
   elseif qLow:find("developer", 1, true) or qLow:find("kisne banaya", 1, true) then
     return "Is app aur BTP Assistant ko Ibrahim Ansari ne develop kiya hai."
   elseif qLow:find("version", 1, true) then
@@ -2248,13 +2360,13 @@ local function sanitizeAiResponseText(rawTxt)
   if low == "" or low == "null" or low:find("<!doctype html", 1, true) or low:find("<html", 1, true) or low:find("error 5", 1, true) or low:find("rate limit", 1, true) then
     return ""
   end
-  return t
+  return enforceBtpAssistantIdentity(t)
 end
 
-local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQuery, callback)
-  local matchedLocal = findLocalTrainedAnswer(fallbackQuery)
+local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQuery, callback, extra_trained)
+  local matchedLocal = findLocalTrainedAnswer(fallbackQuery, extra_trained)
   if matchedLocal and matchedLocal ~= "" then
-    callback(true, matchedLocal)
+    callback(true, enforceBtpAssistantIdentity(matchedLocal))
     return
   end
 
@@ -2264,8 +2376,10 @@ local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQue
   end
 
   local mId = (modelObj and modelObj.backendId) or "gemini-flash"
-  local encodedPrompt = URLEncoder.encode(promptText, "UTF-8")
-  local encodedRawQ = URLEncoder.encode(tostring(fallbackQuery or promptText):sub(1, 300), "UTF-8")
+  local identityGuard = "STRICT RULE: Your name is BTP Assistant, created by Ibrahim Ansari for Blind Tech Power Hub. NEVER say you are ChatGPT or OpenAI. "
+  local fullPrompt = identityGuard .. promptText
+  local encodedPrompt = URLEncoder.encode(fullPrompt, "UTF-8")
+  local encodedRawQ = URLEncoder.encode(identityGuard .. "User asks: " .. tostring(fallbackQuery or promptText):sub(1, 250), "UTF-8")
 
   local url1 = "https://ai-hub.schoolofmindlight.workers.dev/?model=" .. URLEncoder.encode(mId, "UTF-8") .. "&chat=" .. encodedPrompt
   Http.get(url1, nil, "UTF-8", nil, function(code1, content1)
@@ -2294,6 +2408,131 @@ local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQue
       end)
     end)
   end)
+end
+
+-- ========================================================
+-- PERSONAL CHAT ASSISTANT SETUP & TRAINING (ALL USERS)
+-- ========================================================
+
+function showPersonalAssistantSetupDialog()
+  if current_username == "" then
+    showToast("Please login first.")
+    return
+  end
+
+  local layout = makeLayout(true, 14)
+  local is_enabled = sp.getBoolean("personal_ast_enabled", false)
+  local away_msg = tostring(sp.getString("personal_ast_away_msg", "Main abhi offline hoon, meri jagah BTP Assistant reply kar raha hai."))
+  local raw_personal_train = tostring(sp.getString("personal_ast_training_json", "[]"))
+  local ok_pt, personal_train_list = pcall(cjson.decode, raw_personal_train)
+  if not ok_pt or type(personal_train_list) ~= "table" then
+    personal_train_list = {}
+  end
+
+  local status_tv = makeText("Personal Chat Assistant: " .. (is_enabled and "ACTIVE (ON)" or "INACTIVE (OFF)"), 15)
+  status_tv.setTextColor(is_enabled and 0xFF2E7D32 or 0xFFD32F2F)
+  layout.addView(status_tv)
+
+  layout.addView(makeText("Jab aap offline honge, tab aapki personal chat mein BTP Assistant automatically reply karega. Online aate hi auto-reply band ho jayega.", 12))
+
+  local toggle_btn = makeButton(is_enabled and "Turn OFF Personal Assistant" or "Turn ON Personal Assistant")
+  layout.addView(toggle_btn)
+
+  local away_inp = EditText(activity)
+  away_inp.setHint("Custom Offline Greeting / Away Note")
+  away_inp.setText(away_msg)
+  layout.addView(away_inp)
+
+  layout.addView(makeText("Train Your Personal Assistant (Add Custom Q&A):", 14))
+  local q_inp = EditText(activity)
+  q_inp.setHint("Agar koi yeh poochhe (e.g. kahan ho, number do)")
+  local a_inp = EditText(activity)
+  a_inp.setHint("Toh assistant yeh jawab de")
+  a_inp.setMinLines(2)
+  layout.addView(q_inp)
+  layout.addView(a_inp)
+
+  local add_qa_btn = makeButton("Add Training Q&A")
+  layout.addView(add_qa_btn)
+
+  local list_tv = makeText("", 12)
+  local sc = ScrollView(activity)
+  sc.addView(list_tv)
+  layout.addView(sc, LinearLayout.LayoutParams(-1, 180))
+
+  local function refreshTrainPreview()
+    if #personal_train_list == 0 then
+      list_tv.setText("No personal training added yet.")
+    else
+      local lines = {}
+      for i, item in ipairs(personal_train_list) do
+        table.insert(lines, tostring(i) .. ". Q: " .. tostring(item.q or "") .. "\n    A: " .. tostring(item.a or ""))
+      end
+      list_tv.setText(table.concat(lines, "\n\n"))
+    end
+  end
+  refreshTrainPreview()
+
+  local function syncPersonalAssistantToFirebase(enabled_state)
+    local clean_away = trim(away_inp.getText())
+    if clean_away == "" then
+      clean_away = "Main abhi offline hoon, meri jagah BTP Assistant reply kar raha hai."
+    end
+    sp.edit()
+      .putBoolean("personal_ast_enabled", enabled_state)
+      .putString("personal_ast_away_msg", clean_away)
+      .putString("personal_ast_training_json", cjson.encode(personal_train_list))
+      .apply()
+
+    local fb_payload = {
+      enabled = enabled_state,
+      away_message = clean_away,
+      training = personal_train_list,
+      updated_epoch = os.time()
+    }
+    http_post_or_put(FIREBASE_URL .. "personal_assistants/" .. encodeKey(current_username) .. ".json", "PUT", fb_payload, function() end)
+  end
+
+  toggle_btn.setOnClickListener(function()
+    is_enabled = not is_enabled
+    status_tv.setText("Personal Chat Assistant: " .. (is_enabled and "ACTIVE (ON)" or "INACTIVE (OFF)"))
+    status_tv.setTextColor(is_enabled and 0xFF2E7D32 or 0xFFD32F2F)
+    toggle_btn.setText(is_enabled and "Turn OFF Personal Assistant" or "Turn ON Personal Assistant")
+    syncPersonalAssistantToFirebase(is_enabled)
+    showToast(is_enabled and "Personal Chat Assistant Activated!" or "Personal Chat Assistant Turned OFF.")
+  end)
+
+  add_qa_btn.setOnClickListener(function()
+    local qt = trim(q_inp.getText())
+    local at = trim(a_inp.getText())
+    if qt == "" or at == "" then
+      showToast("Question aur Answer dono likhein.")
+      return
+    end
+    table.insert(personal_train_list, { q = qt, a = at })
+    q_inp.setText("")
+    a_inp.setText("")
+    refreshTrainPreview()
+    syncPersonalAssistantToFirebase(is_enabled)
+    showToast("Personal Assistant trained!")
+  end)
+
+  AlertDialog.Builder(activity)
+    .setTitle("Personal Chat BTP Assistant")
+    .setView(layout)
+    .setPositiveButton("Save & Close", DialogInterface.OnClickListener{
+      onClick = function()
+        syncPersonalAssistantToFirebase(is_enabled)
+      end
+    })
+    .setNegativeButton("Clear Training", DialogInterface.OnClickListener{
+      onClick = function()
+        personal_train_list = {}
+        syncPersonalAssistantToFirebase(is_enabled)
+        showToast("Personal training cleared.")
+      end
+    })
+    .show()
 end
 
 local function openAssistantLiveVoiceDialog()
@@ -2354,7 +2593,7 @@ local function openAssistantLiveVoiceDialog()
 
   local function speakLiveReply(txt)
     if not isLive then return end
-    local clean = stripAssistantMarkdownEmojis(txt)
+    local clean = stripAssistantMarkdownEmojis(enforceBtpAssistantIdentity(txt))
     statusTv.setText("Status: Speaking...")
     logTv.setText("BTP Assistant: " .. clean)
     turnCnt = turnCnt + 1
@@ -2421,7 +2660,7 @@ local function openAssistantLiveVoiceDialog()
           logTv.setText(uname .. ": " .. spoken)
           statusTv.setText("Status: Thinking...")
           local trainedCtx = buildTrainedKnowledgeContext(spoken)
-          local prompt = "BTP Assistant (" .. APP_TITLE .. "). " .. (trainedCtx ~= "" and (trainedCtx .. ". ") or "") .. "Q: " .. spoken .. " (Short clear answer, no emojis)"
+          local prompt = "You are BTP Assistant (" .. APP_TITLE .. "). " .. (trainedCtx ~= "" and (trainedCtx .. ". ") or "") .. "Q: " .. spoken .. " (Short clear answer, no emojis)"
           fetchAssistantReplyWithFallback({backendId = "gemini-flash"}, prompt, spoken, function(ok, reply)
             if not isLive then return end
             if ok and reply ~= "" then
@@ -2587,7 +2826,8 @@ function openBTPAssistantDialog()
     bubble.setPadding(12, 10, 12, 10)
     bubble.setFocusable(true)
 
-    local bodyTv = makeText(sender .. ":\n" .. tostring(textStr or ""), 14)
+    local finalTxt = isReply and enforceBtpAssistantIdentity(textStr) or tostring(textStr or "")
+    local bodyTv = makeText(sender .. ":\n" .. finalTxt, 14)
     bodyTv.setTextIsSelectable(true)
     bubble.addView(bodyTv)
 
@@ -2597,7 +2837,7 @@ function openBTPAssistantDialog()
       listenBtn.setEnabled(false)
       row.addView(listenBtn)
 
-      local codeSnippet = extractLuaCode(tostring(textStr or ""))
+      local codeSnippet = extractLuaCode(finalTxt)
       if codeSnippet and codeSnippet ~= "" then
         local copyBtn = makeButton("Copy Code")
         copyBtn.setOnClickListener(function()
@@ -2610,7 +2850,7 @@ function openBTPAssistantDialog()
 
       replySeq = replySeq + 1
       local mp3Path = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_ast_reply_" .. tostring(replySeq) .. ".mp3"
-      generateAssistantSpeechFile(tostring(textStr or ""), "hi", mp3Path, function(ok, savedP)
+      generateAssistantSpeechFile(finalTxt, "hi", mp3Path, function(ok, savedP)
         if ok then
           listenBtn.setText("Listen")
           listenBtn.setEnabled(true)
@@ -2624,7 +2864,7 @@ function openBTPAssistantDialog()
           listenBtn.setText("Retry Voice")
           listenBtn.setEnabled(true)
           listenBtn.setOnClickListener(function()
-            generateAssistantSpeechFile(tostring(textStr or ""), "hi", mp3Path, function(ok2, p2)
+            generateAssistantSpeechFile(finalTxt, "hi", mp3Path, function(ok2, p2)
               if ok2 then
                 listenBtn.setText("Listen")
                 toggleAstAudio(p2, listenBtn)
@@ -2723,7 +2963,7 @@ function openBTPAssistantDialog()
     local chosenModel = ast_models[model_idx] or ast_models[1]
     local trainedCtx = buildTrainedKnowledgeContext(q)
     local recentCtx = (mem_enabled and #chatHistory > 0) and ("Prev: " .. table.concat(chatHistory, " | ") .. ". ") or ""
-    local sysPrompt = "You are BTP Assistant in " .. APP_TITLE .. ". "
+    local sysPrompt = "You are BTP Assistant in " .. APP_TITLE .. " built by Ibrahim Ansari. Never call yourself ChatGPT. "
       .. (trainedCtx ~= "" and ("Info: " .. trainedCtx .. ". ") or "")
       .. recentCtx
       .. "Q: " .. q .. "\nAnswer directly and concisely in clear Hindi/English without emojis."
@@ -2736,7 +2976,7 @@ function openBTPAssistantDialog()
       sendBtn.setText("Send")
 
       if ok and reply ~= "" then
-        local cleanReply = trim(tostring(reply))
+        local cleanReply = enforceBtpAssistantIdentity(trim(tostring(reply)))
         appendAstBubble("BTP Assistant", cleanReply, true, true)
         if mem_enabled then
           table.insert(chatHistory, q:sub(1, 60) .. " -> " .. cleanReply:sub(1, 80))
@@ -2816,6 +3056,7 @@ function openBTPAssistantDialog()
     local curM = ast_models[model_idx] or ast_models[1]
     local opts = {
       "Open BTP Live Voice Mode",
+      "Personal Chat Assistant Setup & Train",
       "Change Model (" .. curM.displayName .. ")",
       "Auto TTS: " .. (auto_tts and "ON" or "OFF"),
       "Memory: " .. (mem_enabled and "ON" or "OFF"),
@@ -2831,6 +3072,8 @@ function openBTPAssistantDialog()
             stopAstAudio()
             openAssistantLiveVoiceDialog()
           elseif w == 1 then
+            showPersonalAssistantSetupDialog()
+          elseif w == 2 then
             local names = {}
             for _, m in ipairs(ast_models) do table.insert(names, m.displayName) end
             AlertDialog.Builder(activity)
@@ -2842,22 +3085,22 @@ function openBTPAssistantDialog()
                   showToast("Model: " .. ast_models[model_idx].displayName)
                 end
               }).show()
-          elseif w == 2 then
+          elseif w == 3 then
             auto_tts = not auto_tts
             sp.edit().putBoolean("btp_ast_auto_tts", auto_tts).apply()
             showToast("Auto TTS: " .. (auto_tts and "ON" or "OFF"))
-          elseif w == 3 then
+          elseif w == 4 then
             mem_enabled = not mem_enabled
             sp.edit().putBoolean("btp_ast_mem_on", mem_enabled).apply()
             showToast("Memory: " .. (mem_enabled and "ON" or "OFF"))
-          elseif w == 4 then
+          elseif w == 5 then
             awaitingFeedbackInput = true
             appendAstBubble("BTP Assistant", "Apna feedback type karein aur Send dabayein.", true, false)
-          elseif w == 5 then
+          elseif w == 6 then
             chatHistory = {}
             sp.edit().putString("btp_ast_memory", "").apply()
             showToast("Assistant memory cleared.")
-          elseif w == 6 then
+          elseif w == 7 then
             showMessage("About BTP Assistant", "Name: BTP Assistant\nPlatform: " .. APP_TITLE .. "\nDeveloper: " .. APP_DEV .. "\nModel: " .. curM.displayName)
           end
         end
@@ -2890,7 +3133,7 @@ function openBTPAssistantDialog()
 end
 
 -- ========================================================
--- ASSISTANT MANAGEMENT DIALOG
+-- ASSISTANT MANAGEMENT DIALOG (ADMIN / VERIFIED)
 -- ========================================================
 
 local function showAssistantManagementDialog()
@@ -2901,7 +3144,7 @@ local function showAssistantManagementDialog()
 
   local layout = makeLayout(true, 14)
   local lockBtn = makeButton(assistant_is_locked and "Unlock BTP Assistant (Currently Locked)" or "Lock BTP Assistant (Hide Input for Users)")
-  local trainBtn = makeButton("Train Assistant (Add / View Q&A Knowledge)")
+  local trainBtn = makeButton("Train Global Assistant (Add / View Q&A Knowledge)")
   local fbBtn = makeButton("View User Feedbacks from Assistant")
 
   layout.addView(lockBtn)
@@ -2939,7 +3182,7 @@ local function showAssistantManagementDialog()
     tBox.addView(sc, LinearLayout.LayoutParams(-1, 220))
 
     AlertDialog.Builder(activity)
-      .setTitle("Train BTP Assistant")
+      .setTitle("Train Global BTP Assistant")
       .setView(tBox)
       .setPositiveButton("Save Training", DialogInterface.OnClickListener{
         onClick = function()
@@ -2984,7 +3227,7 @@ local function showAssistantManagementDialog()
 end
 
 -- ========================================================
--- DATA-SAVING CLEANUP (RUNS ONCE PER 24 HOURS ONLY)
+-- DATA-SAVING CLEANUP & ANNOUNCEMENT / YOUTUBE LINK CHECKER
 -- ========================================================
 
 local function runSilentAutoCleanup()
@@ -3033,12 +3276,53 @@ local function runSilentAutoCleanup()
   end)
 end
 
--- ========================================================
--- ONE-TIME POPUP ANNOUNCEMENT NOTE CHECKER
--- ========================================================
+local function checkYoutubeBroadcastDialog()
+  if not isNetworkAvailable() then return end
+  http_get(FIREBASE_URL .. "settings/youtube_broadcast.json", function(s, r)
+    if s and r and r ~= "null" then
+      local ok, data = pcall(cjson.decode, r)
+      if ok and type(data) == "table" then
+        local yt_id = tostring(data.yt_id or "")
+        local yt_title = trim(tostring(data.title or ""))
+        local yt_url = trim(tostring(data.url or ""))
+        if yt_id ~= "" and yt_url ~= "" then
+          local seen_yt = tostring(sp.getString("last_seen_yt_broadcast_id", ""))
+          if seen_yt == yt_id then return end
+
+          playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
+          local box = makeLayout(true, 16)
+          box.addView(makeText(yt_title ~= "" and yt_title or "New Video Shared by Admin", 16))
+          box.addView(makeText("Tap 'Play on YouTube' to watch directly on YouTube.", 13))
+
+          AlertDialog.Builder(activity)
+            .setTitle("YouTube Video Broadcast")
+            .setView(box)
+            .setCancelable(false)
+            .setPositiveButton("Play on YouTube", DialogInterface.OnClickListener{
+              onClick = function()
+                sp.edit().putString("last_seen_yt_broadcast_id", yt_id).apply()
+                pcall(function()
+                  local intent = Intent(Intent.ACTION_VIEW, Uri.parse(yt_url))
+                  activity.startActivity(intent)
+                end)
+              end
+            })
+            .setNegativeButton("Close", DialogInterface.OnClickListener{
+              onClick = function()
+                sp.edit().putString("last_seen_yt_broadcast_id", yt_id).apply()
+              end
+            })
+            .show()
+        end
+      end
+    end
+  end)
+end
 
 local function checkPopupAnnouncementNote()
-  if not isNetworkAvailable() then return end
+  if not isNetworkAvailable() then
+    return
+  end
   http_get(FIREBASE_URL .. "settings/popup_announcement.json", function(s, r)
     if s and r and r ~= "null" then
       local ok, data = pcall(cjson.decode, r)
@@ -3057,6 +3341,7 @@ local function checkPopupAnnouncementNote()
       if note_text ~= "" then
         local last_seen_note_id = tostring(sp.getString("last_seen_announcement_id", ""))
         if last_seen_note_id == note_id then
+          checkYoutubeBroadcastDialog()
           return
         end
 
@@ -3072,10 +3357,15 @@ local function checkPopupAnnouncementNote()
           .setPositiveButton("OK", DialogInterface.OnClickListener{
             onClick = function()
               sp.edit().putString("last_seen_announcement_id", note_id).apply()
+              checkYoutubeBroadcastDialog()
             end
           })
           .show()
+      else
+        checkYoutubeBroadcastDialog()
       end
+    else
+      checkYoutubeBroadcastDialog()
     end
   end)
 end
@@ -3085,7 +3375,7 @@ end
 -- ========================================================
 
 local function checkBlockStatus(onNotBlocked)
-  if current_username == "" or isDeveloper(current_username) then
+  if current_username == "" or isDeveloper(current_username) or not isNetworkAvailable() then
     if onNotBlocked then onNotBlocked() end
     return
   end
@@ -3412,7 +3702,7 @@ function showNotificationsDialog()
 end
 
 -- ========================================================
--- PERSONAL CHAT (1-ON-1)
+-- PERSONAL CHAT (1-ON-1 WITH OFFLINE CACHE & BTP ASSISTANT AUTO-REPLY)
 -- ========================================================
 
 local function getSymmetricChatKey(u1, u2)
@@ -3429,13 +3719,21 @@ function openPersonalChat(target_user)
   local layout = makeLayout(true, 10)
 
   local chat_header = makeLayout(false, 5)
-  local chat_title_tv = makeText(getVerifiedName(target_user) .. " (Checking...)", 15)
+  local initial_status_label = isNetworkAvailable() and " (Checking...)" or " (Offline)"
+  local chat_title_tv = makeText(getVerifiedName(target_user) .. initial_status_label, 15)
   chat_title_tv.setTextColor(0xFF1E88E5)
   chat_header.addView(chat_title_tv, LinearLayout.LayoutParams(0, -2, 1))
 
   local more_btn = makeButton("More Options")
   chat_header.addView(more_btn, LinearLayout.LayoutParams(-2, -2))
   layout.addView(chat_header)
+
+  local managed_by_ast_banner = makeText("This chat is managed by BTP Assistant when user is offline.", 12)
+  managed_by_ast_banner.setBackgroundColor(0xFFEDE7F6)
+  managed_by_ast_banner.setTextColor(0xFF4A148C)
+  managed_by_ast_banner.setPadding(8, 6, 8, 6)
+  managed_by_ast_banner.setVisibility(View.GONE)
+  layout.addView(managed_by_ast_banner)
 
   local block_notice_banner = makeText("", 13)
   block_notice_banner.setTextColor(0xFFD32F2F)
@@ -3446,7 +3744,7 @@ function openPersonalChat(target_user)
   local scroll = ScrollView(activity)
   local chat_container = makeLayout(true, 8)
   scroll.addView(chat_container)
-  layout.addView(scroll, LinearLayout.LayoutParams(-1, 320))
+  layout.addView(scroll, LinearLayout.LayoutParams(-1, 310))
 
   local reply_banner = makeLayout(false, 8)
   reply_banner.setBackgroundColor(0xFFE0E0E0)
@@ -3487,7 +3785,7 @@ function openPersonalChat(target_user)
   local voice_main_btn = makeButton("Record Voice Message")
   voice_section.addView(voice_main_btn, LinearLayout.LayoutParams(-1, -2))
 
-  local voice_call_btn = makeButton("Voice Call")
+  local voice_call_btn = makeButton("Live Voice Call")
   voice_section.addView(voice_call_btn, LinearLayout.LayoutParams(-1, -2))
 
   local voice_action_row = makeLayout(false, 2)
@@ -3507,7 +3805,7 @@ function openPersonalChat(target_user)
   layout.addView(go_back_btn, LinearLayout.LayoutParams(-1, -2))
 
   local dialog = AlertDialog.Builder(activity)
-    .setTitle(getVerifiedName(target_user))
+    .setTitle(getVerifiedName(target_user) .. initial_status_label)
     .setView(layout)
     .setCancelable(true)
     .create()
@@ -3515,6 +3813,7 @@ function openPersonalChat(target_user)
   dialog.show()
 
   local room_key = getSymmetricChatKey(current_username, target_user)
+  local cache_key_pchat = "pchat_cache_" .. room_key
   local seen_message_ids = {}
   local is_chat_active = true
   local is_initial_load = true
@@ -3525,6 +3824,8 @@ function openPersonalChat(target_user)
 
   local is_blocked_by_them = false
   local is_blocked_by_me = false
+  local target_is_currently_online = false
+  local target_personal_ast_cfg = nil
 
   local voice_state = "idle"
   local media_recorder = nil
@@ -3595,6 +3896,267 @@ function openPersonalChat(target_user)
     initiateVoiceCall("direct", target_user, getVerifiedName(target_user), {target_user})
   end)
 
+  local function checkTargetPersonalAssistantConfig()
+    if not is_chat_active or not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "personal_assistants/" .. encodeKey(target_user) .. ".json", function(s, r)
+      if not is_chat_active then return end
+      if s and r and r ~= "null" then
+        local ok, cfg = pcall(cjson.decode, r)
+        if ok and type(cfg) == "table" and (cfg.enabled == true or cfg.enabled == "true") then
+          target_personal_ast_cfg = cfg
+          managed_by_ast_banner.setText("This chat is managed by BTP Assistant when " .. target_user .. " is offline.")
+          managed_by_ast_banner.setVisibility(View.VISIBLE)
+          return
+        end
+      end
+      target_personal_ast_cfg = nil
+      managed_by_ast_banner.setVisibility(View.GONE)
+    end)
+  end
+
+  local function renderPersonalMessagesFromRaw(raw_json_str, force_refresh, from_network)
+    local msg_list = {}
+    local current_hash_builder = {}
+
+    if raw_json_str and raw_json_str ~= "null" then
+      local ok, data = pcall(cjson.decode, raw_json_str)
+      if ok and type(data) == "table" then
+        for k, v in pairs(data) do
+          if type(v) == "table" then
+            v.id = k
+            table.insert(msg_list, v)
+            if from_network then
+              local base_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. k
+              if trim(tostring(v.receiver or "")):lower() == trim(current_username):lower() then
+                markMessageSeenInFirebase(base_msg_url)
+                if v.status ~= "Read" then
+                  v.status = "Read"
+                  http_post_or_put(base_msg_url .. "/status.json", "PUT", "Read", function() end)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    table.sort(msg_list, function(a, b)
+      return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
+    end)
+
+    local new_reaction_on_my_msg = false
+    for _, m in ipairs(msg_list) do
+      local r_pairs = {}
+      if type(m.reactions) == "table" then
+        for rk, rv in pairs(m.reactions) do
+          table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
+          local rx_unique = "p_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
+          if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
+            if not is_initial_load and not known_reaction_keys[rx_unique] then
+              new_reaction_on_my_msg = true
+            end
+          end
+          known_reaction_keys[rx_unique] = true
+        end
+      end
+      table.sort(r_pairs)
+      local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
+      local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
+      local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
+      table.insert(current_hash_builder, tostring(m.id) .. ":" .. tostring(m.status or "") .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
+    end
+    local current_data_hash = table.concat(current_hash_builder, "|")
+
+    if new_reaction_on_my_msg and is_chat_active and from_network then
+      playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+
+    if current_data_hash == last_rendered_data_hash and not is_initial_load and not force_refresh then
+      return
+    end
+
+    if active_voice_player ~= nil and not force_refresh then
+      return
+    end
+
+    local new_incoming_msg = false
+    for _, m in ipairs(msg_list) do
+      if not seen_message_ids[m.id] then
+        seen_message_ids[m.id] = true
+        if from_network and not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > chat_open_time then
+          new_incoming_msg = true
+        end
+      end
+    end
+
+    last_rendered_data_hash = current_data_hash
+    chat_container.removeAllViews()
+    local room_voice_playlist = {}
+
+    if #msg_list == 0 then
+      chat_container.addView(makeText("No messages yet. Say hello!", 14))
+    else
+      local last_day_header = ""
+      for _, msg in ipairs(msg_list) do
+        local day_lbl = getDayLabelFromRaw(msg.timestamp_raw)
+        if day_lbl ~= "" and day_lbl ~= last_day_header then
+          last_day_header = day_lbl
+          chat_container.addView(createAccessibleDayHeader(day_lbl), LinearLayout.LayoutParams(-1, -2))
+        end
+
+        local is_me = (trim(tostring(msg.sender or "")):lower() == trim(tostring(current_username or "")):lower())
+        local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
+        local is_ast_auto = (msg.is_assistant_auto == true or msg.is_assistant_auto == "true")
+        local bubble = makeLayout(true, 8)
+        if is_me then
+          bubble.setBackgroundColor(0xFFDCF8C6)
+        elseif is_ast_auto then
+          bubble.setBackgroundColor(0xFFF3E5F5)
+        else
+          bubble.setBackgroundColor(0xFFFFFFFF)
+        end
+        bubble.setPadding(12, 10, 12, 10)
+
+        if is_deleted_all then
+          bubble.setClickable(false)
+          bubble.setFocusable(true)
+          local del_tv = makeText("This message was deleted", 13)
+          del_tv.setTextColor(0xFF757575)
+          bubble.addView(del_tv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+        else
+          bubble.setClickable(true)
+          bubble.setFocusable(true)
+
+          if msg.reply_to and type(msg.reply_to) == "table" then
+            local quote_box = makeLayout(true, 6)
+            quote_box.setBackgroundColor(0xFFE8E8E8)
+            quote_box.setPadding(8, 6, 8, 6)
+            quote_box.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
+            local q_preview = tostring(msg.reply_to.text or "")
+            if #q_preview > 80 then q_preview = q_preview:sub(1, 80) .. "..." end
+            local q_tv = makeText(q_preview, 12)
+            q_tv.setTextColor(0xFF555555)
+            quote_box.addView(q_tv)
+            bubble.addView(quote_box, LinearLayout.LayoutParams(-1, -2))
+          end
+
+          local sender_label = is_me and "You" or (is_ast_auto and ("BTP Assistant (for " .. tostring(msg.sender or target_user) .. ")") or getVerifiedName(msg.sender))
+          if msg.msg_type == "voice" and msg.audio_base64 then
+            local dur_str = tostring(msg.audio_duration or "0") .. "s"
+            local voice_title = makeText(sender_label .. ": Voice message (" .. dur_str .. ")", 14)
+            voice_title.setPadding(0, 4, 0, 4)
+            bubble.addView(voice_title)
+            local fb_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. tostring(msg.id)
+            buildVoiceBubblePlayer(bubble, msg, dur_str, room_voice_playlist, fb_msg_url)
+          else
+            local msg_content_tv = makeText(sender_label .. ": " .. (msg.text or ""), 14)
+            msg_content_tv.setPadding(0, 4, 0, 4)
+            bubble.addView(msg_content_tv)
+          end
+
+          renderClickableReactions(bubble, msg.reactions)
+
+          local seen_txt = formatSeenByText(msg.seen_by)
+          local meta_line = tostring(msg.timestamp or "")
+          if is_me and seen_txt ~= "" then
+            meta_line = meta_line .. " • " .. seen_txt
+          end
+
+          local meta_tv = makeText(meta_line, 11)
+          meta_tv.setTextColor(0xFF777777)
+          bubble.addView(meta_tv)
+
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+
+          bubble.setOnClickListener(View.OnClickListener{
+            onClick = function()
+              local opts = {"Reply", "Add Reaction", "Delete for Me", "Delete for Everyone"}
+              AlertDialog.Builder(activity)
+                .setTitle("Message Options")
+                .setItems(opts, DialogInterface.OnClickListener{
+                  onClick = function(d_sub, which)
+                    local choice = opts[which + 1]
+                    if choice == "Reply" then
+                      active_reply_target = { sender = msg.sender, text = msg.text }
+                      reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
+                      reply_banner.setVisibility(View.VISIBLE)
+                      msg_input.requestFocus()
+                    elseif choice == "Add Reaction" then
+                      local reactions_list = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
+                      AlertDialog.Builder(activity)
+                        .setTitle("Select Reaction")
+                        .setItems(reactions_list, DialogInterface.OnClickListener{
+                          onClick = function(d_emo, ew)
+                            local selected_rx = reactions_list[ew + 1]
+                            http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", selected_rx, function(rok)
+                              if rok then
+                                playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+                                loadMessages(true)
+                              end
+                            end)
+                          end
+                        }).show()
+                    elseif choice == "Delete for Me" then
+                      bubble.setVisibility(View.GONE)
+                      showToast("Deleted for you.")
+                    elseif choice == "Delete for Everyone" then
+                      local del_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id
+                      http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
+                        if ok then
+                          http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
+                          http_delete(del_url .. "/audio_base64.json", function() end)
+                          showToast("Deleted for everyone.")
+                          loadMessages(true)
+                        else
+                          showToast("Failed to delete message.")
+                        end
+                      end)
+                    end
+                  end
+                }).show()
+            end
+          })
+        end
+      end
+    end
+
+    current_voice_playlist = room_voice_playlist
+
+    if is_initial_load or new_incoming_msg then
+      scroll.post(Runnable({
+        run = function()
+          scroll.fullScroll(ScrollView.FOCUS_DOWN)
+        end
+      }))
+    end
+
+    if new_incoming_msg and is_chat_active and from_network then
+      playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+    if from_network then
+      is_initial_load = false
+    end
+  end
+
+  local function loadMessages(force_refresh)
+    if not is_chat_active then return end
+    if is_initial_load then
+      local cached_raw = loadOfflineCache(cache_key_pchat)
+      if cached_raw then
+        renderPersonalMessagesFromRaw(cached_raw, true, false)
+      end
+    end
+    if not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "personal_chats/" .. room_key .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
+      if not is_chat_active then return end
+      if success and response and response ~= "null" then
+        saveOfflineCache(cache_key_pchat, response)
+      end
+      renderPersonalMessagesFromRaw(success and response or nil, force_refresh, true)
+    end)
+  end
+
   local function executeVoiceSendAfterPreSound(duration_sec)
     voice_status_tv.setText("Sending voice message...")
     voice_status_tv.setVisibility(View.VISIBLE)
@@ -3635,6 +4197,7 @@ function openPersonalChat(target_user)
       if success then
         playSound(SOUND_SEND, nil, ToneGenerator.TONE_PROP_BEEP, false)
         showToast("Voice message sent!")
+        loadMessages(true)
       else
         showToast("Failed to send voice message.")
       end
@@ -3808,19 +4371,27 @@ function openPersonalChat(target_user)
   end
 
   local function checkTargetPresence()
-    if not is_chat_active or not isNetworkAvailable() then return end
+    if not is_chat_active then return end
+    local base_name = getVerifiedName(target_user)
+    if not isNetworkAvailable() then
+      target_is_currently_online = false
+      chat_title_tv.setText(base_name .. " (Offline)")
+      dialog.setTitle(base_name .. " (Offline)")
+      return
+    end
     http_get(FIREBASE_URL .. "user_presence/" .. encodeKey(target_user) .. ".json", function(s, r)
       if not is_chat_active then return end
-      local base_name = getVerifiedName(target_user)
       if s and r and r ~= "null" then
         local ok, data = pcall(cjson.decode, r)
         if ok and type(data) == "table" then
           local current_time = os.time()
           local last_time = tonumber(data.time_epoch or 0)
           if data.status == "online" and (current_time - last_time < 240) then
+            target_is_currently_online = true
             chat_title_tv.setText(base_name .. " (Online)")
             dialog.setTitle(base_name .. " (Online)")
           else
+            target_is_currently_online = false
             local ls = tostring(data.last_seen or "Offline")
             chat_title_tv.setText(base_name .. " (" .. ls .. ")")
             dialog.setTitle(base_name .. " (" .. ls .. ")")
@@ -3828,6 +4399,7 @@ function openPersonalChat(target_user)
           return
         end
       end
+      target_is_currently_online = false
       chat_title_tv.setText(base_name .. " (Offline)")
       dialog.setTitle(base_name .. " (Offline)")
     end)
@@ -3835,229 +4407,7 @@ function openPersonalChat(target_user)
 
   checkPeerBlockStatus()
   checkTargetPresence()
-
-  local function loadMessages(force_refresh)
-    if not is_chat_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. "personal_chats/" .. room_key .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
-      if not is_chat_active then return end
-      local msg_list = {}
-      local current_hash_builder = {}
-
-      if success and response and response ~= "null" then
-        local ok, data = pcall(cjson.decode, response)
-        if ok and type(data) == "table" then
-          for k, v in pairs(data) do
-            if type(v) == "table" then
-              v.id = k
-              table.insert(msg_list, v)
-              local base_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. k
-              if trim(tostring(v.receiver or "")):lower() == trim(current_username):lower() then
-                markMessageSeenInFirebase(base_msg_url)
-                if v.status ~= "Read" then
-                  v.status = "Read"
-                  http_post_or_put(base_msg_url .. "/status.json", "PUT", "Read", function() end)
-                end
-              end
-            end
-          end
-        end
-      end
-
-      table.sort(msg_list, function(a, b)
-        return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
-      end)
-
-      local new_reaction_on_my_msg = false
-      for _, m in ipairs(msg_list) do
-        local r_pairs = {}
-        if type(m.reactions) == "table" then
-          for rk, rv in pairs(m.reactions) do
-            table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
-            local rx_unique = "p_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
-            if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
-              if not is_initial_load and not known_reaction_keys[rx_unique] then
-                new_reaction_on_my_msg = true
-              end
-            end
-            known_reaction_keys[rx_unique] = true
-          end
-        end
-        table.sort(r_pairs)
-        local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
-        local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
-        local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
-        table.insert(current_hash_builder, tostring(m.id) .. ":" .. tostring(m.status or "") .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
-      end
-      local current_data_hash = table.concat(current_hash_builder, "|")
-
-      if new_reaction_on_my_msg and is_chat_active then
-        playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
-
-      if current_data_hash == last_rendered_data_hash and not is_initial_load and not force_refresh then
-        return
-      end
-
-      if active_voice_player ~= nil and not force_refresh then
-        return
-      end
-
-      local new_incoming_msg = false
-      for _, m in ipairs(msg_list) do
-        if not seen_message_ids[m.id] then
-          seen_message_ids[m.id] = true
-          if not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > chat_open_time then
-            new_incoming_msg = true
-          end
-        end
-      end
-
-      last_rendered_data_hash = current_data_hash
-      chat_container.removeAllViews()
-      local room_voice_playlist = {}
-
-      if #msg_list == 0 then
-        chat_container.addView(makeText("No messages yet. Say hello!", 14))
-      else
-        local last_day_header = ""
-        for _, msg in ipairs(msg_list) do
-          local day_lbl = getDayLabelFromRaw(msg.timestamp_raw)
-          if day_lbl ~= "" and day_lbl ~= last_day_header then
-            last_day_header = day_lbl
-            chat_container.addView(createAccessibleDayHeader(day_lbl), LinearLayout.LayoutParams(-1, -2))
-          end
-
-          local is_me = (trim(tostring(msg.sender or "")):lower() == trim(tostring(current_username or "")):lower())
-          local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
-          local bubble = makeLayout(true, 8)
-          if is_me then
-            bubble.setBackgroundColor(0xFFDCF8C6)
-          else
-            bubble.setBackgroundColor(0xFFFFFFFF)
-          end
-          bubble.setPadding(12, 10, 12, 10)
-
-          if is_deleted_all then
-            bubble.setClickable(false)
-            bubble.setFocusable(true)
-            local del_tv = makeText("This message was deleted", 13)
-            del_tv.setTextColor(0xFF757575)
-            bubble.addView(del_tv)
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
-          else
-            bubble.setClickable(true)
-            bubble.setFocusable(true)
-
-            if msg.reply_to and type(msg.reply_to) == "table" then
-              local quote_box = makeLayout(true, 6)
-              quote_box.setBackgroundColor(0xFFE8E8E8)
-              quote_box.setPadding(8, 6, 8, 6)
-              quote_box.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
-              local q_preview = tostring(msg.reply_to.text or "")
-              if #q_preview > 80 then q_preview = q_preview:sub(1, 80) .. "..." end
-              local q_tv = makeText(q_preview, 12)
-              q_tv.setTextColor(0xFF555555)
-              quote_box.addView(q_tv)
-              bubble.addView(quote_box, LinearLayout.LayoutParams(-1, -2))
-            end
-
-            local sender_label = is_me and "You" or getVerifiedName(msg.sender)
-            if msg.msg_type == "voice" and msg.audio_base64 then
-              local dur_str = tostring(msg.audio_duration or "0") .. "s"
-              local voice_title = makeText(sender_label .. ": Voice message (" .. dur_str .. ")", 14)
-              voice_title.setPadding(0, 4, 0, 4)
-              bubble.addView(voice_title)
-              local fb_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. tostring(msg.id)
-              buildVoiceBubblePlayer(bubble, msg, dur_str, room_voice_playlist, fb_msg_url)
-            else
-              local msg_content_tv = makeText(sender_label .. ": " .. (msg.text or ""), 14)
-              msg_content_tv.setPadding(0, 4, 0, 4)
-              bubble.addView(msg_content_tv)
-            end
-
-            renderClickableReactions(bubble, msg.reactions)
-
-            local seen_txt = formatSeenByText(msg.seen_by)
-            local meta_line = tostring(msg.timestamp or "")
-            if is_me and seen_txt ~= "" then
-              meta_line = meta_line .. " • " .. seen_txt
-            end
-
-            local meta_tv = makeText(meta_line, 11)
-            meta_tv.setTextColor(0xFF777777)
-            bubble.addView(meta_tv)
-
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
-
-            bubble.setOnClickListener(View.OnClickListener{
-              onClick = function()
-                local opts = {"Reply", "Add Reaction", "Delete for Me", "Delete for Everyone"}
-                AlertDialog.Builder(activity)
-                  .setTitle("Message Options")
-                  .setItems(opts, DialogInterface.OnClickListener{
-                    onClick = function(d_sub, which)
-                      local choice = opts[which + 1]
-                      if choice == "Reply" then
-                        active_reply_target = { sender = msg.sender, text = msg.text }
-                        reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
-                        reply_banner.setVisibility(View.VISIBLE)
-                        msg_input.requestFocus()
-                      elseif choice == "Add Reaction" then
-                        local reactions_list = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
-                        AlertDialog.Builder(activity)
-                          .setTitle("Select Reaction")
-                          .setItems(reactions_list, DialogInterface.OnClickListener{
-                            onClick = function(d_emo, ew)
-                              local selected_rx = reactions_list[ew + 1]
-                              http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", selected_rx, function(rok)
-                                if rok then
-                                  playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-                                  loadMessages(true)
-                                end
-                              end)
-                            end
-                          }).show()
-                      elseif choice == "Delete for Me" then
-                        bubble.setVisibility(View.GONE)
-                        showToast("Deleted for you.")
-                      elseif choice == "Delete for Everyone" then
-                        local del_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id
-                        http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
-                          if ok then
-                            http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
-                            http_delete(del_url .. "/audio_base64.json", function() end)
-                            showToast("Deleted for everyone.")
-                            loadMessages(true)
-                          else
-                            showToast("Failed to delete message.")
-                          end
-                        end)
-                      end
-                    end
-                  }).show()
-              end
-            })
-          end
-        end
-      end
-
-      current_voice_playlist = room_voice_playlist
-
-      if is_initial_load or new_incoming_msg then
-        scroll.post(Runnable({
-          run = function()
-            scroll.fullScroll(ScrollView.FOCUS_DOWN)
-          end
-        }))
-      end
-
-      if new_incoming_msg and is_chat_active then
-        playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
-      is_initial_load = false
-    end)
-  end
-
+  checkTargetPersonalAssistantConfig()
   loadMessages(true)
 
   live_runnable = Runnable({
@@ -4066,6 +4416,7 @@ function openPersonalChat(target_user)
         loadMessages(false)
         checkPeerBlockStatus()
         checkTargetPresence()
+        checkTargetPersonalAssistantConfig()
         live_handler.postDelayed(live_runnable, CHAT_POLL_INTERVAL_MS)
       end
     end
@@ -4076,7 +4427,7 @@ function openPersonalChat(target_user)
     http_get(FIREBASE_URL .. "user_blocks/" .. encodeKey(current_username) .. "/" .. encodeKey(target_user) .. ".json", function(s_blk, r_blk)
       local currently_blocked = (s_blk and (r_blk == "true" or r_blk == '"true"'))
       local block_action_title = currently_blocked and "Unblock User" or "Block User"
-      local choices = {"Clear Chat", block_action_title}
+      local choices = {"Clear Chat", block_action_title, "My Personal BTP Assistant Settings"}
 
       AlertDialog.Builder(activity)
         .setTitle("More Options")
@@ -4086,6 +4437,7 @@ function openPersonalChat(target_user)
             if selected == "Clear Chat" then
               http_delete(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", function(ok)
                 if ok then
+                  saveOfflineCache(cache_key_pchat, "{}")
                   showToast("Chat cleared.")
                   loadMessages(true)
                 end
@@ -4104,11 +4456,50 @@ function openPersonalChat(target_user)
                   checkPeerBlockStatus()
                 end
               end)
+            elseif selected == "My Personal BTP Assistant Settings" then
+              showPersonalAssistantSetupDialog()
             end
           end
         }).show()
     end)
   end)
+
+  local function triggerOfflineAssistantReplyIfNeeded(user_msg_text)
+    if target_is_currently_online then return end
+    if type(target_personal_ast_cfg) ~= "table" then return end
+    if not (target_personal_ast_cfg.enabled == true or target_personal_ast_cfg.enabled == "true") then return end
+
+    local user_train = type(target_personal_ast_cfg.training) == "table" and target_personal_ast_cfg.training or {}
+    local away_prefix = trim(tostring(target_personal_ast_cfg.away_message or ""))
+    local trained_ctx = buildTrainedKnowledgeContext(user_msg_text, user_train)
+
+    local prompt = "You are BTP Assistant replying on behalf of " .. target_user .. " because " .. target_user .. " is currently offline. "
+      .. (away_prefix ~= "" and ("Owner note: " .. away_prefix .. ". ") or "")
+      .. (trained_ctx ~= "" and ("Owner trained info: " .. trained_ctx .. ". ") or "")
+      .. "Message from " .. current_username .. ": " .. user_msg_text
+      .. "\nReply politely, concisely, and naturally as BTP Assistant without emojis."
+
+    fetchAssistantReplyWithFallback({backendId = "gemini-flash"}, prompt, user_msg_text, function(ok, ast_reply)
+      local final_reply = (ok and ast_reply ~= "") and ast_reply or (away_prefix ~= "" and away_prefix or (target_user .. " is currently offline. Main BTP Assistant hoon, aapka message note kar liya gaya hai."))
+      final_reply = enforceBtpAssistantIdentity(final_reply)
+
+      local ast_payload = {
+        sender = target_user,
+        receiver = current_username,
+        msg_type = "text",
+        is_assistant_auto = true,
+        text = final_reply,
+        status = "Sent",
+        timestamp = os.date("%I:%M %p"),
+        timestamp_raw = os.date("%Y%m%d%H%M%S")
+      }
+      http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", "POST", ast_payload, function(post_ok)
+        if post_ok and is_chat_active then
+          loadMessages(true)
+        end
+      end)
+    end, user_train)
+  end
 
   send_btn.setOnClickListener(function()
     if is_blocked_by_them then
@@ -4150,22 +4541,28 @@ function openPersonalChat(target_user)
             scroll.fullScroll(ScrollView.FOCUS_DOWN)
           end
         }))
+        triggerOfflineAssistantReplyIfNeeded(text)
       else
         showToast("Failed to send message.")
       end
     end)
   end)
-end
-
+endend
 -- ========================================================
--- BTP VOICE ROOM (CLEAN UI - NO LIMIT BUTTONS, NO NAME IN TITLE)
+-- BTP VOICE ROOM (OFFLINE CACHE, LIVE VOICE CHAT & ONLINE FIX)
 -- ========================================================
 
 function openBtpVoiceRoomDialog()
   local layout = makeLayout(true, 10)
 
   local initial_lock_view = public_room_locked and not canBypassRoomLock(current_username)
-  local initial_title = initial_lock_view and "BTP Voice Room" or "BTP Voice Room (1 online)"
+  local initial_title = "BTP Voice Room"
+  if not isNetworkAvailable() then
+    initial_title = "BTP Voice Room (Offline)"
+  elseif not initial_lock_view then
+    initial_title = "BTP Voice Room (Checking online...)"
+  end
+
   local title_tv = makeText(initial_title, 16)
   title_tv.setTextColor(0xFF1E88E5)
   title_tv.setPadding(4, 2, 4, 6)
@@ -4220,8 +4617,8 @@ function openBtpVoiceRoomDialog()
   local voice_main_btn = makeButton("Record Voice Message")
   voice_section.addView(voice_main_btn, LinearLayout.LayoutParams(-1, -2))
 
-  local start_voice_chat_btn = makeButton("Start Voice Chat")
-  start_voice_chat_btn.setContentDescription("Start Voice Chat")
+  local start_voice_chat_btn = makeButton("Start Live Voice Chat")
+  start_voice_chat_btn.setContentDescription("Start Live Voice Chat")
   voice_section.addView(start_voice_chat_btn, LinearLayout.LayoutParams(-1, -2))
 
   local voice_action_row = makeLayout(false, 2)
@@ -4326,6 +4723,12 @@ function openBtpVoiceRoomDialog()
 
   local function applyRoomLockAndOnlineState()
     if not is_room_active then return end
+    if not isNetworkAvailable() then
+      title_tv.setText("BTP Voice Room (Offline)")
+      dialog.setTitle("BTP Voice Room (Offline)")
+      return
+    end
+
     local bypass_lock = canBypassRoomLock(current_username)
     local lock_enforced_for_me = (public_room_locked and not bypass_lock)
 
@@ -4349,215 +4752,242 @@ function openBtpVoiceRoomDialog()
       end
     end
 
-    if not isNetworkAvailable() then return end
     http_get(FIREBASE_URL .. "user_presence.json", function(s, r)
       if not is_room_active or public_room_locked then return end
+      if not isNetworkAvailable() then
+        title_tv.setText("BTP Voice Room (Offline)")
+        dialog.setTitle("BTP Voice Room (Offline)")
+        return
+      end
       local count = getOnlineUsersSummary(s and r or nil)
-      local combined_title = "BTP Voice Room (" .. tostring(count) .. " online)"
+      local combined_title = (count > 0) and ("BTP Voice Room (" .. tostring(count) .. " online)") or "BTP Voice Room (Offline)"
       title_tv.setText(combined_title)
       dialog.setTitle(combined_title)
     end)
   end
 
-  local function loadRoomMessages(force_refresh)
-    if not is_room_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. 'btp_voice_room.json?orderBy="$key"&limitToLast=80', function(success, response)
-      if not is_room_active then return end
-      local msg_list = {}
-      local hash_builder = {}
+  local function renderRoomMessagesFromRaw(raw_json_str, force_refresh, from_network)
+    local msg_list = {}
+    local hash_builder = {}
 
-      if success and response and response ~= "null" then
-        local ok, data = pcall(cjson.decode, response)
-        if ok and type(data) == "table" then
-          for k, v in pairs(data) do
-            if type(v) == "table" then
-              v.id = k
-              table.insert(msg_list, v)
+    if raw_json_str and raw_json_str ~= "null" then
+      local ok, data = pcall(cjson.decode, raw_json_str)
+      if ok and type(data) == "table" then
+        for k, v in pairs(data) do
+          if type(v) == "table" then
+            v.id = k
+            table.insert(msg_list, v)
+            if from_network then
               markMessageSeenInFirebase(FIREBASE_URL .. "btp_voice_room/" .. tostring(k))
             end
           end
         end
       end
+    end
 
-      table.sort(msg_list, function(a, b)
-        return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
-      end)
+    table.sort(msg_list, function(a, b)
+      return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
+    end)
 
-      local new_rx_on_mine = false
-      for _, m in ipairs(msg_list) do
-        local r_pairs = {}
-        if type(m.reactions) == "table" then
-          for rk, rv in pairs(m.reactions) do
-            table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
-            local rx_unique = "vr_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
-            if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
-              if not is_initial_load and not known_reaction_keys[rx_unique] then
-                new_rx_on_mine = true
-              end
+    if #msg_list > 0 then
+      local latest_item = msg_list[#msg_list]
+      sp.edit().putString("last_seen_vr_msg_id", tostring(latest_item.id or "")).apply()
+    end
+
+    local new_rx_on_mine = false
+    for _, m in ipairs(msg_list) do
+      local r_pairs = {}
+      if type(m.reactions) == "table" then
+        for rk, rv in pairs(m.reactions) do
+          table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
+          local rx_unique = "vr_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
+          if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
+            if not is_initial_load and not known_reaction_keys[rx_unique] then
+              new_rx_on_mine = true
             end
-            known_reaction_keys[rx_unique] = true
           end
-        end
-        table.sort(r_pairs)
-        local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
-        local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
-        local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
-        table.insert(hash_builder, tostring(m.id) .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
-      end
-      local cur_hash = table.concat(hash_builder, "|")
-
-      if new_rx_on_mine and is_room_active then
-        playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
-
-      if cur_hash == last_hash and not is_initial_load and not force_refresh then return end
-      if active_voice_player ~= nil and not force_refresh then return end
-
-      local new_incoming = false
-      for _, m in ipairs(msg_list) do
-        if not seen_ids[m.id] then
-          seen_ids[m.id] = true
-          if not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > room_open_time then
-            new_incoming = true
-          end
+          known_reaction_keys[rx_unique] = true
         end
       end
+      table.sort(r_pairs)
+      local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
+      local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
+      local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
+      table.insert(hash_builder, tostring(m.id) .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
+    end
+    local cur_hash = table.concat(hash_builder, "|")
 
-      last_hash = cur_hash
-      chat_container.removeAllViews()
-      local vr_playlist = {}
+    if new_rx_on_mine and is_room_active and from_network then
+      playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
 
-      if #msg_list == 0 then
-        chat_container.addView(makeText("Welcome to BTP Voice Room. Start the conversation!", 14))
-      else
-        local last_day = ""
-        for _, msg in ipairs(msg_list) do
-          local dl = getDayLabelFromRaw(msg.timestamp_raw)
-          if dl ~= "" and dl ~= last_day then
-            last_day = dl
-            chat_container.addView(createAccessibleDayHeader(dl), LinearLayout.LayoutParams(-1, -2))
+    if cur_hash == last_hash and not is_initial_load and not force_refresh then return end
+    if active_voice_player ~= nil and not force_refresh then return end
+
+    local new_incoming = false
+    for _, m in ipairs(msg_list) do
+      if not seen_ids[m.id] then
+        seen_ids[m.id] = true
+        if from_network and not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > room_open_time then
+          new_incoming = true
+        end
+      end
+    end
+
+    last_hash = cur_hash
+    chat_container.removeAllViews()
+    local vr_playlist = {}
+
+    if #msg_list == 0 then
+      chat_container.addView(makeText("Welcome to BTP Voice Room. Start the conversation!", 14))
+    else
+      local last_day = ""
+      for _, msg in ipairs(msg_list) do
+        local dl = getDayLabelFromRaw(msg.timestamp_raw)
+        if dl ~= "" and dl ~= last_day then
+          last_day = dl
+          chat_container.addView(createAccessibleDayHeader(dl), LinearLayout.LayoutParams(-1, -2))
+        end
+
+        local is_me = (trim(tostring(msg.sender or "")):lower() == trim(current_username):lower())
+        local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
+        local bubble = makeLayout(true, 8)
+        bubble.setBackgroundColor(is_me and 0xFFDCF8C6 or 0xFFFFFFFF)
+        bubble.setPadding(12, 10, 12, 10)
+
+        if is_deleted_all then
+          bubble.setClickable(false)
+          bubble.setFocusable(true)
+          local del_tv = makeText("This message was deleted", 13)
+          del_tv.setTextColor(0xFF757575)
+          bubble.addView(del_tv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+        else
+          bubble.setClickable(true)
+          bubble.setFocusable(true)
+
+          if msg.reply_to and type(msg.reply_to) == "table" then
+            local qbox = makeLayout(true, 6)
+            qbox.setBackgroundColor(0xFFE8E8E8)
+            qbox.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
+            qbox.addView(makeText(tostring(msg.reply_to.text or ""), 12))
+            bubble.addView(qbox, LinearLayout.LayoutParams(-1, -2))
           end
 
-          local is_me = (trim(tostring(msg.sender or "")):lower() == trim(current_username):lower())
-          local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
-          local bubble = makeLayout(true, 8)
-          bubble.setBackgroundColor(is_me and 0xFFDCF8C6 or 0xFFFFFFFF)
-          bubble.setPadding(12, 10, 12, 10)
-
-          if is_deleted_all then
-            bubble.setClickable(false)
-            bubble.setFocusable(true)
-            local del_tv = makeText("This message was deleted", 13)
-            del_tv.setTextColor(0xFF757575)
-            bubble.addView(del_tv)
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+          local sender_lbl = is_me and "You" or getVerifiedName(msg.sender)
+          if msg.msg_type == "voice" and msg.audio_base64 then
+            local dstr = tostring(msg.audio_duration or "0") .. "s"
+            bubble.addView(makeText(sender_lbl .. ": Voice message (" .. dstr .. ")", 14))
+            local fb_msg_url = FIREBASE_URL .. "btp_voice_room/" .. tostring(msg.id)
+            buildVoiceBubblePlayer(bubble, msg, dstr, vr_playlist, fb_msg_url)
           else
-            bubble.setClickable(true)
-            bubble.setFocusable(true)
-
-            if msg.reply_to and type(msg.reply_to) == "table" then
-              local qbox = makeLayout(true, 6)
-              qbox.setBackgroundColor(0xFFE8E8E8)
-              qbox.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
-              qbox.addView(makeText(tostring(msg.reply_to.text or ""), 12))
-              bubble.addView(qbox, LinearLayout.LayoutParams(-1, -2))
-            end
-
-            local sender_lbl = is_me and "You" or getVerifiedName(msg.sender)
-            if msg.msg_type == "voice" and msg.audio_base64 then
-              local dstr = tostring(msg.audio_duration or "0") .. "s"
-              bubble.addView(makeText(sender_lbl .. ": Voice message (" .. dstr .. ")", 14))
-              local fb_msg_url = FIREBASE_URL .. "btp_voice_room/" .. tostring(msg.id)
-              buildVoiceBubblePlayer(bubble, msg, dstr, vr_playlist, fb_msg_url)
-            else
-              bubble.addView(makeText(sender_lbl .. ": " .. (msg.text or ""), 14))
-            end
-
-            renderClickableReactions(bubble, msg.reactions)
-
-            local seen_txt = formatSeenByText(msg.seen_by)
-            local meta_line = tostring(msg.timestamp or "")
-            if seen_txt ~= "" then
-              meta_line = meta_line .. " • " .. seen_txt
-            end
-
-            local mtv = makeText(meta_line, 11)
-            mtv.setTextColor(0xFF777777)
-            bubble.addView(mtv)
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
-
-            bubble.setOnClickListener(View.OnClickListener{
-              onClick = function()
-                local opts = {"Add Reaction", "Delete for Me"}
-                if not (public_room_locked and not canBypassRoomLock(current_username)) then
-                  table.insert(opts, 1, "Reply")
-                end
-                if not is_me and trim(tostring(msg.sender or "")) ~= "" then
-                  table.insert(opts, "Private Chat with " .. tostring(msg.sender))
-                end
-                if is_me or canBypassRoomLock(current_username) then
-                  table.insert(opts, "Delete for Everyone")
-                end
-
-                AlertDialog.Builder(activity)
-                  .setTitle("Message Options")
-                  .setItems(opts, DialogInterface.OnClickListener{
-                    onClick = function(d_sub, which)
-                      local choice = opts[which + 1]
-                      if choice == "Reply" then
-                        active_reply_target = { sender = msg.sender, text = msg.text }
-                        reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
-                        reply_banner.setVisibility(View.VISIBLE)
-                        msg_input.requestFocus()
-                      elseif choice == "Add Reaction" then
-                        local rlist = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
-                        AlertDialog.Builder(activity)
-                          .setTitle("Select Reaction")
-                          .setItems(rlist, DialogInterface.OnClickListener{
-                            onClick = function(de, ew)
-                              http_post_or_put(FIREBASE_URL .. "btp_voice_room/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", rlist[ew + 1], function(ok)
-                                if ok then
-                                  playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-                                  loadRoomMessages(true)
-                                end
-                              end)
-                            end
-                          }).show()
-                      elseif choice == "Delete for Me" then
-                        bubble.setVisibility(View.GONE)
-                        showToast("Deleted for you.")
-                      elseif choice == "Delete for Everyone" then
-                        local del_url = FIREBASE_URL .. "btp_voice_room/" .. msg.id
-                        http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
-                          if ok then
-                            http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
-                            http_delete(del_url .. "/audio_base64.json", function() end)
-                            showToast("Deleted for everyone.")
-                            loadRoomMessages(true)
-                          end
-                        end)
-                      elseif choice:find("Private Chat with ", 1, true) then
-                        closeRoom()
-                        dialog.dismiss()
-                        openPersonalChat(msg.sender)
-                      end
-                    end
-                  }).show()
-              end
-            })
+            bubble.addView(makeText(sender_lbl .. ": " .. (msg.text or ""), 14))
           end
+
+          renderClickableReactions(bubble, msg.reactions)
+
+          local seen_txt = formatSeenByText(msg.seen_by)
+          local meta_line = tostring(msg.timestamp or "")
+          if seen_txt ~= "" then
+            meta_line = meta_line .. " • " .. seen_txt
+          end
+
+          local mtv = makeText(meta_line, 11)
+          mtv.setTextColor(0xFF777777)
+          bubble.addView(mtv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+
+          bubble.setOnClickListener(View.OnClickListener{
+            onClick = function()
+              local opts = {"Add Reaction", "Delete for Me"}
+              if not (public_room_locked and not canBypassRoomLock(current_username)) then
+                table.insert(opts, 1, "Reply")
+              end
+              if not is_me and trim(tostring(msg.sender or "")) ~= "" then
+                table.insert(opts, "Private Chat with " .. tostring(msg.sender))
+              end
+              if is_me or canBypassRoomLock(current_username) then
+                table.insert(opts, "Delete for Everyone")
+              end
+
+              AlertDialog.Builder(activity)
+                .setTitle("Message Options")
+                .setItems(opts, DialogInterface.OnClickListener{
+                  onClick = function(d_sub, which)
+                    local choice = opts[which + 1]
+                    if choice == "Reply" then
+                      active_reply_target = { sender = msg.sender, text = msg.text }
+                      reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
+                      reply_banner.setVisibility(View.VISIBLE)
+                      msg_input.requestFocus()
+                    elseif choice == "Add Reaction" then
+                      local rlist = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
+                      AlertDialog.Builder(activity)
+                        .setTitle("Select Reaction")
+                        .setItems(rlist, DialogInterface.OnClickListener{
+                          onClick = function(de, ew)
+                            http_post_or_put(FIREBASE_URL .. "btp_voice_room/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", rlist[ew + 1], function(ok)
+                              if ok then
+                                playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+                                loadRoomMessages(true)
+                              end
+                            end)
+                          end
+                        }).show()
+                    elseif choice == "Delete for Me" then
+                      bubble.setVisibility(View.GONE)
+                      showToast("Deleted for you.")
+                    elseif choice == "Delete for Everyone" then
+                      local del_url = FIREBASE_URL .. "btp_voice_room/" .. msg.id
+                      http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
+                        if ok then
+                          http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
+                          http_delete(del_url .. "/audio_base64.json", function() end)
+                          showToast("Deleted for everyone.")
+                          loadRoomMessages(true)
+                        end
+                      end)
+                    elseif choice:find("Private Chat with ", 1, true) then
+                      closeRoom()
+                      dialog.dismiss()
+                      openPersonalChat(msg.sender)
+                    end
+                  end
+                }).show()
+            end
+          })
         end
       end
+    end
 
-      current_voice_playlist = vr_playlist
+    current_voice_playlist = vr_playlist
 
-      if is_initial_load or new_incoming or force_refresh then
-        scroll.post(Runnable({ run = function() scroll.fullScroll(ScrollView.FOCUS_DOWN) end }))
-      end
-      if new_incoming and is_room_active then
-        playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
+    if is_initial_load or new_incoming or force_refresh then
+      scroll.post(Runnable({ run = function() scroll.fullScroll(ScrollView.FOCUS_DOWN) end }))
+    end
+    if new_incoming and is_room_active and from_network then
+      playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+    if from_network then
       is_initial_load = false
+    end
+  end
+
+  local function loadRoomMessages(force_refresh)
+    if not is_room_active then return end
+    if is_initial_load then
+      local cached_vr = loadOfflineCache("btp_voice_room_cache")
+      if cached_vr then
+        renderRoomMessagesFromRaw(cached_vr, true, false)
+      end
+    end
+    if not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. 'btp_voice_room.json?orderBy="$key"&limitToLast=80', function(success, response)
+      if not is_room_active then return end
+      if success and response and response ~= "null" then
+        saveOfflineCache("btp_voice_room_cache", response)
+      end
+      renderRoomMessagesFromRaw(success and response or nil, force_refresh, true)
     end)
   end
 
@@ -4730,10 +5160,13 @@ function openBtpVoiceRoomDialog()
     showToast("Voice recording discarded.")
   end)
 
+  applyRoomLockAndOnlineState()
+  loadRoomMessages(true)
+
   syncServerAndRoomSettings(function()
     if is_room_active then
       applyRoomLockAndOnlineState()
-      loadRoomMessages(true)
+      loadRoomMessages(false)
     end
   end)
 
@@ -4786,7 +5219,7 @@ function openBtpVoiceRoomDialog()
 end
 
 -- ========================================================
--- GROUPS SYSTEM
+-- GROUPS SYSTEM (WITH OFFLINE CACHE & LIVE GROUP VOICE CALL)
 -- ========================================================
 
 function showCreateGroupDialog(onCreatedCallback)
@@ -5186,7 +5619,7 @@ function openGroupChatDialog(gid, group_data)
   local voice_main_btn = makeButton("Record Voice Message")
   voice_section.addView(voice_main_btn, LinearLayout.LayoutParams(-1, -2))
 
-  local group_voice_call_btn = makeButton("Group Voice Call")
+  local group_voice_call_btn = makeButton("Live Group Voice Call")
   voice_section.addView(group_voice_call_btn, LinearLayout.LayoutParams(-1, -2))
 
   local voice_action_row = makeLayout(false, 2)
@@ -5211,6 +5644,7 @@ function openGroupChatDialog(gid, group_data)
     .create()
   dialog.show()
 
+  local cache_key_grp = "grp_msg_cache_" .. tostring(gid)
   local is_grp_active = true
   local is_initial_load = true
   local grp_open_time = os.date("%Y%m%d%H%M%S")
@@ -5357,237 +5791,255 @@ function openGroupChatDialog(gid, group_data)
     http_post_or_put(FIREBASE_URL .. "btp_groups/" .. gid .. "/last_activity_epoch.json", "PUT", os.time(), function() end)
   end
 
-  local function loadGroupMessages(force_refresh)
-    if not is_grp_active or not isNetworkAvailable() then return end
-    http_get(FIREBASE_URL .. "btp_group_messages/" .. gid .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
-      if not is_grp_active then return end
-      local msg_list = {}
-      local hash_builder = {}
+  local function renderGroupMessagesFromRaw(raw_json_str, force_refresh, from_network)
+    local msg_list = {}
+    local hash_builder = {}
 
-      if success and response and response ~= "null" then
-        local ok, data = pcall(cjson.decode, response)
-        if ok and type(data) == "table" then
-          for k, v in pairs(data) do
-            if type(v) == "table" then
-              local traw = tostring(v.timestamp_raw or "")
-              if local_cleared_before == "" or traw > local_cleared_before then
-                v.id = k
-                table.insert(msg_list, v)
+    if raw_json_str and raw_json_str ~= "null" then
+      local ok, data = pcall(cjson.decode, raw_json_str)
+      if ok and type(data) == "table" then
+        for k, v in pairs(data) do
+          if type(v) == "table" then
+            local traw = tostring(v.timestamp_raw or "")
+            if local_cleared_before == "" or traw > local_cleared_before then
+              v.id = k
+              table.insert(msg_list, v)
+              if from_network then
                 markMessageSeenInFirebase(FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. tostring(k))
               end
             end
           end
         end
       end
+    end
 
-      table.sort(msg_list, function(a, b)
-        return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
-      end)
+    table.sort(msg_list, function(a, b)
+      return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
+    end)
 
-      local new_rx_on_mine = false
-      for _, m in ipairs(msg_list) do
-        local r_pairs = {}
-        if type(m.reactions) == "table" then
-          for rk, rv in pairs(m.reactions) do
-            table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
-            local rx_unique = "gr_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
-            if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
-              if not is_initial_load and not known_reaction_keys[rx_unique] then
-                new_rx_on_mine = true
-              end
+    local new_rx_on_mine = false
+    for _, m in ipairs(msg_list) do
+      local r_pairs = {}
+      if type(m.reactions) == "table" then
+        for rk, rv in pairs(m.reactions) do
+          table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
+          local rx_unique = "gr_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
+          if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
+            if not is_initial_load and not known_reaction_keys[rx_unique] then
+              new_rx_on_mine = true
             end
-            known_reaction_keys[rx_unique] = true
           end
-        end
-        table.sort(r_pairs)
-        local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
-        local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
-        local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
-        table.insert(hash_builder, tostring(m.id) .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
-      end
-      local pin_id = (type(group_data.pinned_message) == "table" and tostring(group_data.pinned_message.id or "")) or ""
-      local cur_hash = table.concat(hash_builder, "|") .. ":" .. local_cleared_before .. ":pin" .. pin_id
-
-      if new_rx_on_mine and is_grp_active then
-        playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
-
-      if cur_hash == last_hash and not is_initial_load and not force_refresh then return end
-      if active_voice_player ~= nil and not force_refresh then return end
-
-      local new_incoming = false
-      for _, m in ipairs(msg_list) do
-        if not seen_ids[m.id] then
-          seen_ids[m.id] = true
-          if not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > grp_open_time then
-            new_incoming = true
-          end
+          known_reaction_keys[rx_unique] = true
         end
       end
+      table.sort(r_pairs)
+      local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
+      local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
+      local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
+      table.insert(hash_builder, tostring(m.id) .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
+    end
+    local pin_id = (type(group_data.pinned_message) == "table" and tostring(group_data.pinned_message.id or "")) or ""
+    local cur_hash = table.concat(hash_builder, "|") .. ":" .. local_cleared_before .. ":pin" .. pin_id
 
-      last_hash = cur_hash
-      chat_container.removeAllViews()
-      local grp_playlist = {}
+    if new_rx_on_mine and is_grp_active and from_network then
+      playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
 
-      if #msg_list == 0 then
-        chat_container.addView(makeText("No messages in this group yet.", 14))
-      else
-        local last_day = ""
-        for _, msg in ipairs(msg_list) do
-          local dl = getDayLabelFromRaw(msg.timestamp_raw)
-          if dl ~= "" and dl ~= last_day then
-            last_day = dl
-            chat_container.addView(createAccessibleDayHeader(dl), LinearLayout.LayoutParams(-1, -2))
+    if cur_hash == last_hash and not is_initial_load and not force_refresh then return end
+    if active_voice_player ~= nil and not force_refresh then return end
+
+    local new_incoming = false
+    for _, m in ipairs(msg_list) do
+      if not seen_ids[m.id] then
+        seen_ids[m.id] = true
+        if from_network and not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > grp_open_time then
+          new_incoming = true
+        end
+      end
+    end
+
+    last_hash = cur_hash
+    chat_container.removeAllViews()
+    local grp_playlist = {}
+
+    if #msg_list == 0 then
+      chat_container.addView(makeText("No messages in this group yet.", 14))
+    else
+      local last_day = ""
+      for _, msg in ipairs(msg_list) do
+        local dl = getDayLabelFromRaw(msg.timestamp_raw)
+        if dl ~= "" and dl ~= last_day then
+          last_day = dl
+          chat_container.addView(createAccessibleDayHeader(dl), LinearLayout.LayoutParams(-1, -2))
+        end
+
+        local is_me = (trim(tostring(msg.sender or "")):lower() == trim(current_username):lower())
+        local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
+        local bubble = makeLayout(true, 8)
+        bubble.setBackgroundColor(is_me and 0xFFDCF8C6 or 0xFFFFFFFF)
+        bubble.setPadding(12, 10, 12, 10)
+
+        if is_deleted_all then
+          bubble.setClickable(false)
+          bubble.setFocusable(true)
+          local del_tv = makeText("This message was deleted", 13)
+          del_tv.setTextColor(0xFF757575)
+          bubble.addView(del_tv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+        else
+          bubble.setClickable(true)
+          bubble.setFocusable(true)
+
+          if msg.reply_to and type(msg.reply_to) == "table" then
+            local qbox = makeLayout(true, 6)
+            qbox.setBackgroundColor(0xFFE8E8E8)
+            qbox.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
+            qbox.addView(makeText(tostring(msg.reply_to.text or ""), 12))
+            bubble.addView(qbox, LinearLayout.LayoutParams(-1, -2))
           end
 
-          local is_me = (trim(tostring(msg.sender or "")):lower() == trim(current_username):lower())
-          local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
-          local bubble = makeLayout(true, 8)
-          bubble.setBackgroundColor(is_me and 0xFFDCF8C6 or 0xFFFFFFFF)
-          bubble.setPadding(12, 10, 12, 10)
-
-          if is_deleted_all then
-            bubble.setClickable(false)
-            bubble.setFocusable(true)
-            local del_tv = makeText("This message was deleted", 13)
-            del_tv.setTextColor(0xFF757575)
-            bubble.addView(del_tv)
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+          local sender_lbl = is_me and "You" or getVerifiedName(msg.sender)
+          if msg.msg_type == "voice" and msg.audio_base64 then
+            local dstr = tostring(msg.audio_duration or "0") .. "s"
+            bubble.addView(makeText(sender_lbl .. ": Voice message (" .. dstr .. ")", 14))
+            local fb_msg_url = FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. tostring(msg.id)
+            buildVoiceBubblePlayer(bubble, msg, dstr, grp_playlist, fb_msg_url)
           else
-            bubble.setClickable(true)
-            bubble.setFocusable(true)
-
-            if msg.reply_to and type(msg.reply_to) == "table" then
-              local qbox = makeLayout(true, 6)
-              qbox.setBackgroundColor(0xFFE8E8E8)
-              qbox.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
-              qbox.addView(makeText(tostring(msg.reply_to.text or ""), 12))
-              bubble.addView(qbox, LinearLayout.LayoutParams(-1, -2))
-            end
-
-            local sender_lbl = is_me and "You" or getVerifiedName(msg.sender)
-            if msg.msg_type == "voice" and msg.audio_base64 then
-              local dstr = tostring(msg.audio_duration or "0") .. "s"
-              bubble.addView(makeText(sender_lbl .. ": Voice message (" .. dstr .. ")", 14))
-              local fb_msg_url = FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. tostring(msg.id)
-              buildVoiceBubblePlayer(bubble, msg, dstr, grp_playlist, fb_msg_url)
-            else
-              bubble.addView(makeText(sender_lbl .. ": " .. (msg.text or ""), 14))
-            end
-
-            renderClickableReactions(bubble, msg.reactions)
-
-            local seen_txt = formatSeenByText(msg.seen_by)
-            local meta_line = tostring(msg.timestamp or "")
-            if seen_txt ~= "" then
-              meta_line = meta_line .. " • " .. seen_txt
-            end
-
-            local mtv = makeText(meta_line, 11)
-            mtv.setTextColor(0xFF777777)
-            bubble.addView(mtv)
-            chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
-
-            bubble.setOnClickListener(View.OnClickListener{
-              onClick = function()
-                local can_reply_now = (not isGroupLockedFlag(group_data)) or isUserGroupAdmin(group_data, current_username)
-                local opts = {"Add Reaction", "Delete for Me"}
-                if can_reply_now then
-                  table.insert(opts, 1, "Reply")
-                end
-                if isGroupCreator(group_data, current_username) or isDeveloper(current_username) then
-                  local already_pinned = (type(group_data.pinned_message) == "table" and tostring(group_data.pinned_message.id or "") == tostring(msg.id))
-                  table.insert(opts, already_pinned and "Unpin Message" or "Pin Message")
-                end
-                if not is_me and trim(tostring(msg.sender or "")) ~= "" then
-                  table.insert(opts, "Private Chat with " .. tostring(msg.sender))
-                end
-                if is_me or isUserGroupAdmin(group_data, current_username) then
-                  table.insert(opts, "Delete for Everyone")
-                end
-
-                AlertDialog.Builder(activity)
-                  .setTitle("Message Options")
-                  .setItems(opts, DialogInterface.OnClickListener{
-                    onClick = function(d_sub, which)
-                      local choice = opts[which + 1]
-                      if choice == "Reply" then
-                        active_reply_target = { sender = msg.sender, text = msg.text }
-                        reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
-                        reply_banner.setVisibility(View.VISIBLE)
-                        msg_input.requestFocus()
-                      elseif choice == "Pin Message" then
-                        local pin_payload = {
-                          id = msg.id,
-                          sender = msg.sender,
-                          text = tostring(msg.text or ("Voice message (" .. tostring(msg.audio_duration or "0") .. "s)"))
-                        }
-                        http_post_or_put(FIREBASE_URL .. "btp_groups/" .. gid .. "/pinned_message.json", "PUT", pin_payload, function(ok)
-                          if ok then
-                            group_data.pinned_message = pin_payload
-                            applyPinnedBanner()
-                            showToast("Message pinned.")
-                            loadGroupMessages(true)
-                          end
-                        end)
-                      elseif choice == "Unpin Message" then
-                        http_delete(FIREBASE_URL .. "btp_groups/" .. gid .. "/pinned_message.json", function(ok)
-                          if ok then
-                            group_data.pinned_message = nil
-                            applyPinnedBanner()
-                            showToast("Message unpinned.")
-                            loadGroupMessages(true)
-                          end
-                        end)
-                      elseif choice == "Add Reaction" then
-                        local rlist = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
-                        AlertDialog.Builder(activity)
-                          .setTitle("Select Reaction")
-                          .setItems(rlist, DialogInterface.OnClickListener{
-                            onClick = function(de, ew)
-                              http_post_or_put(FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", rlist[ew + 1], function(ok)
-                                if ok then
-                                  playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
-                                  loadGroupMessages(true)
-                                end
-                              end)
-                            end
-                          }).show()
-                      elseif choice == "Delete for Me" then
-                        bubble.setVisibility(View.GONE)
-                        showToast("Deleted for you.")
-                      elseif choice == "Delete for Everyone" then
-                        local del_url = FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. msg.id
-                        http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
-                          if ok then
-                            http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
-                            http_delete(del_url .. "/audio_base64.json", function() end)
-                            showToast("Deleted for everyone.")
-                            loadGroupMessages(true)
-                          end
-                        end)
-                      elseif choice:find("Private Chat with ", 1, true) then
-                        closeGroupChat()
-                        dialog.dismiss()
-                        openPersonalChat(msg.sender)
-                      end
-                    end
-                  }).show()
-              end
-            })
+            bubble.addView(makeText(sender_lbl .. ": " .. (msg.text or ""), 14))
           end
+
+          renderClickableReactions(bubble, msg.reactions)
+
+          local seen_txt = formatSeenByText(msg.seen_by)
+          local meta_line = tostring(msg.timestamp or "")
+          if seen_txt ~= "" then
+            meta_line = meta_line .. " • " .. seen_txt
+          end
+
+          local mtv = makeText(meta_line, 11)
+          mtv.setTextColor(0xFF777777)
+          bubble.addView(mtv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+
+          bubble.setOnClickListener(View.OnClickListener{
+            onClick = function()
+              local can_reply_now = (not isGroupLockedFlag(group_data)) or isUserGroupAdmin(group_data, current_username)
+              local opts = {"Add Reaction", "Delete for Me"}
+              if can_reply_now then
+                table.insert(opts, 1, "Reply")
+              end
+              if isGroupCreator(group_data, current_username) or isDeveloper(current_username) then
+                local already_pinned = (type(group_data.pinned_message) == "table" and tostring(group_data.pinned_message.id or "") == tostring(msg.id))
+                table.insert(opts, already_pinned and "Unpin Message" or "Pin Message")
+              end
+              if not is_me and trim(tostring(msg.sender or "")) ~= "" then
+                table.insert(opts, "Private Chat with " .. tostring(msg.sender))
+              end
+              if is_me or isUserGroupAdmin(group_data, current_username) then
+                table.insert(opts, "Delete for Everyone")
+              end
+
+              AlertDialog.Builder(activity)
+                .setTitle("Message Options")
+                .setItems(opts, DialogInterface.OnClickListener{
+                  onClick = function(d_sub, which)
+                    local choice = opts[which + 1]
+                    if choice == "Reply" then
+                      active_reply_target = { sender = msg.sender, text = msg.text }
+                      reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
+                      reply_banner.setVisibility(View.VISIBLE)
+                      msg_input.requestFocus()
+                    elseif choice == "Pin Message" then
+                      local pin_payload = {
+                        id = msg.id,
+                        sender = msg.sender,
+                        text = tostring(msg.text or ("Voice message (" .. tostring(msg.audio_duration or "0") .. "s)"))
+                      }
+                      http_post_or_put(FIREBASE_URL .. "btp_groups/" .. gid .. "/pinned_message.json", "PUT", pin_payload, function(ok)
+                        if ok then
+                          group_data.pinned_message = pin_payload
+                          applyPinnedBanner()
+                          showToast("Message pinned.")
+                          loadGroupMessages(true)
+                        end
+                      end)
+                    elseif choice == "Unpin Message" then
+                      http_delete(FIREBASE_URL .. "btp_groups/" .. gid .. "/pinned_message.json", function(ok)
+                        if ok then
+                          group_data.pinned_message = nil
+                          applyPinnedBanner()
+                          showToast("Message unpinned.")
+                          loadGroupMessages(true)
+                        end
+                      end)
+                    elseif choice == "Add Reaction" then
+                      local rlist = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
+                      AlertDialog.Builder(activity)
+                        .setTitle("Select Reaction")
+                        .setItems(rlist, DialogInterface.OnClickListener{
+                          onClick = function(de, ew)
+                            http_post_or_put(FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", rlist[ew + 1], function(ok)
+                              if ok then
+                                playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+                                loadGroupMessages(true)
+                              end
+                            end)
+                          end
+                        }).show()
+                    elseif choice == "Delete for Me" then
+                      bubble.setVisibility(View.GONE)
+                      showToast("Deleted for you.")
+                    elseif choice == "Delete for Everyone" then
+                      local del_url = FIREBASE_URL .. "btp_group_messages/" .. gid .. "/" .. msg.id
+                      http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
+                        if ok then
+                          http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
+                          http_delete(del_url .. "/audio_base64.json", function() end)
+                          showToast("Deleted for everyone.")
+                          loadGroupMessages(true)
+                        end
+                      end)
+                    elseif choice:find("Private Chat with ", 1, true) then
+                      closeGroupChat()
+                      dialog.dismiss()
+                      openPersonalChat(msg.sender)
+                    end
+                  end
+                }).show()
+            end
+          })
         end
       end
+    end
 
-      current_voice_playlist = grp_playlist
+    current_voice_playlist = grp_playlist
 
-      if is_initial_load or new_incoming or force_refresh then
-        scroll.post(Runnable({ run = function() scroll.fullScroll(ScrollView.FOCUS_DOWN) end }))
-      end
-      if new_incoming and is_grp_active then
-        playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      end
+    if is_initial_load or new_incoming or force_refresh then
+      scroll.post(Runnable({ run = function() scroll.fullScroll(ScrollView.FOCUS_DOWN) end }))
+    end
+    if new_incoming and is_grp_active and from_network then
+      playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+    if from_network then
       is_initial_load = false
+    end
+  end
+
+  local function loadGroupMessages(force_refresh)
+    if not is_grp_active then return end
+    if is_initial_load then
+      local cached_g = loadOfflineCache(cache_key_grp)
+      if cached_g then
+        renderGroupMessagesFromRaw(cached_g, true, false)
+      end
+    end
+    if not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "btp_group_messages/" .. gid .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
+      if not is_grp_active then return end
+      if success and response and response ~= "null" then
+        saveOfflineCache(cache_key_grp, response)
+      end
+      renderGroupMessagesFromRaw(success and response or nil, force_refresh, true)
     end)
   end
 
@@ -5885,8 +6337,6 @@ function showGroupsListDialog()
   scroll.addView(list_container)
   layout.addView(scroll, LinearLayout.LayoutParams(-1, 500))
 
-  list_container.addView(makeText("Loading groups...", 14))
-
   local dialog = AlertDialog.Builder(activity)
     .setTitle("Groups")
     .setView(layout)
@@ -5894,145 +6344,161 @@ function showGroupsListDialog()
     .create()
   dialog.show()
 
-  local function loadAllGroups()
-    http_get(FIREBASE_URL .. "btp_groups.json", function(s_g, r_g)
-      list_container.removeAllViews()
-      local hidden_map = getLocalHiddenMap("hidden_groups_json")
+  local function renderGroupsFromRaw(r_g)
+    list_container.removeAllViews()
+    local hidden_map = getLocalHiddenMap("hidden_groups_json")
 
-      local groups_arr = {}
-      if s_g and r_g and r_g ~= "null" then
-        local ok_g, gdata = pcall(cjson.decode, r_g)
-        if ok_g and type(gdata) == "table" then
-          for gid, g in pairs(gdata) do
-            if type(g) == "table" then
-              local is_h = hidden_map[gid]
-              local is_b = (g.is_banned == true or g.is_banned == "true")
-              if not is_h or (is_b and not isVerifiedUser(current_username)) then
-                g.id = gid
-                table.insert(groups_arr, g)
-              end
+    local groups_arr = {}
+    if r_g and r_g ~= "null" then
+      local ok_g, gdata = pcall(cjson.decode, r_g)
+      if ok_g and type(gdata) == "table" then
+        for gid, g in pairs(gdata) do
+          if type(g) == "table" then
+            local is_h = hidden_map[gid]
+            local is_b = (g.is_banned == true or g.is_banned == "true")
+            if not is_h or (is_b and not isVerifiedUser(current_username)) then
+              g.id = gid
+              table.insert(groups_arr, g)
             end
           end
         end
       end
+    end
 
-      table.sort(groups_arr, function(a, b)
-        return tonumber(a.last_activity_epoch or 0) > tonumber(b.last_activity_epoch or 0)
+    table.sort(groups_arr, function(a, b)
+      return tonumber(a.last_activity_epoch or 0) > tonumber(b.last_activity_epoch or 0)
+    end)
+
+    if #groups_arr == 0 then
+      list_container.addView(makeText("No groups created yet. Tap Create Group to start one!", 14))
+      return
+    end
+
+    local my_norm = trim(current_username):lower()
+
+    for _, g in ipairs(groups_arr) do
+      local card = makeLayout(true, 10)
+      card.setBackgroundColor(0xFFEEEEEE)
+      card.setPadding(12, 10, 12, 10)
+      card.setClickable(true)
+      card.setFocusable(true)
+
+      local is_banned_g = (g.is_banned == true or g.is_banned == "true")
+      local is_member = false
+      local is_pending = false
+      local mem_cnt = g.members and table_size(g.members) or 1
+
+      if type(g.members) == "table" then
+        for mk, mv in pairs(g.members) do
+          local mname = type(mv) == "string" and mv or Uri.decode(tostring(mk))
+          if trim(mname):lower() == my_norm then
+            is_member = true
+          end
+        end
+      end
+
+      if type(g.join_requests) == "table" then
+        for rk, rv in pairs(g.join_requests) do
+          local rname = type(rv) == "string" and rv or Uri.decode(tostring(rk))
+          if trim(rname):lower() == my_norm then
+            is_pending = true
+          end
+        end
+      end
+
+      local gtitle_txt = tostring(g.name or "Unnamed Group")
+      local gtitle = makeText(gtitle_txt, 16)
+      gtitle.setTextColor(is_banned_g and 0xFFD32F2F or 0xFF1E88E5)
+      card.addView(gtitle)
+
+      local creator_line = tostring(mem_cnt) .. " members • Creator: " .. getVerifiedName(g.creator or "")
+      if not is_banned_g and tostring(g.description or "") ~= "" then
+        creator_line = creator_line .. " • " .. tostring(g.description)
+      end
+      card.addView(makeText(creator_line, 12))
+
+      local action_btn
+      if is_banned_g and not isVerifiedUser(current_username) then
+        action_btn = makeButton("Group Banned - Tap to View")
+      elseif is_member or isVerifiedUser(current_username) then
+        action_btn = makeButton("Open Group")
+      elseif is_pending then
+        action_btn = makeButton("Cancel Join Request")
+      elseif g.approval_required == true or g.approval_required == "true" then
+        action_btn = makeButton("Request to Join")
+      else
+        action_btn = makeButton("Join Group")
+      end
+      card.addView(action_btn, LinearLayout.LayoutParams(-1, -2))
+
+      local function handleGroupSelect()
+        if is_banned_g and not isVerifiedUser(current_username) then
+          dialog.dismiss()
+          showBannedGroupDialog(g.id, g, function()
+            showGroupsListDialog()
+          end)
+        elseif is_member or isVerifiedUser(current_username) then
+          dialog.dismiss()
+          openGroupChatDialog(g.id, g)
+        elseif is_pending then
+          http_delete(FIREBASE_URL .. "btp_groups/" .. g.id .. "/join_requests/" .. encodeKey(current_username) .. ".json", function(ok)
+            if ok then
+              showToast("Join request cancelled.")
+              loadAllGroups()
+            end
+          end)
+        elseif g.approval_required == true or g.approval_required == "true" then
+          http_post_or_put(FIREBASE_URL .. "btp_groups/" .. g.id .. "/join_requests/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function(ok)
+            if ok then
+              showToast("Join request sent to group admin.")
+              loadAllGroups()
+            end
+          end)
+        else
+          http_post_or_put(FIREBASE_URL .. "btp_groups/" .. g.id .. "/members/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function(ok)
+            if ok then
+              showToast("Joined group!")
+              dialog.dismiss()
+              openGroupChatDialog(g.id, g)
+            end
+          end)
+        end
+      end
+
+      action_btn.setOnClickListener(handleGroupSelect)
+      card.setOnClickListener(function()
+        if is_member or isVerifiedUser(current_username) then
+          dialog.dismiss()
+          openGroupChatDialog(g.id, g)
+        else
+          showMessage(
+            gtitle_txt,
+            "Members: " .. tostring(mem_cnt)
+            .. "\nCreator: " .. getVerifiedName(g.creator or "")
+            .. (tostring(g.description or "") ~= "" and ("\nDescription: " .. tostring(g.description)) or "")
+            .. (is_pending and "\nStatus: Join request pending." or "")
+          )
+        end
       end)
 
-      if #groups_arr == 0 then
-        list_container.addView(makeText("No groups created yet. Tap Create Group to start one!", 14))
-        return
-      end
+      list_container.addView(card, LinearLayout.LayoutParams(-1, -2))
+    end
+  end
 
-      local my_norm = trim(current_username):lower()
-
-      for _, g in ipairs(groups_arr) do
-        local card = makeLayout(true, 10)
-        card.setBackgroundColor(0xFFEEEEEE)
-        card.setPadding(12, 10, 12, 10)
-        card.setClickable(true)
-        card.setFocusable(true)
-
-        local is_banned_g = (g.is_banned == true or g.is_banned == "true")
-        local is_member = false
-        local is_pending = false
-        local mem_cnt = g.members and table_size(g.members) or 1
-
-        if type(g.members) == "table" then
-          for mk, mv in pairs(g.members) do
-            local mname = type(mv) == "string" and mv or Uri.decode(tostring(mk))
-            if trim(mname):lower() == my_norm then
-              is_member = true
-            end
-          end
-        end
-
-        if type(g.join_requests) == "table" then
-          for rk, rv in pairs(g.join_requests) do
-            local rname = type(rv) == "string" and rv or Uri.decode(tostring(rk))
-            if trim(rname):lower() == my_norm then
-              is_pending = true
-            end
-          end
-        end
-
-        local gtitle_txt = tostring(g.name or "Unnamed Group")
-        local gtitle = makeText(gtitle_txt, 16)
-        gtitle.setTextColor(is_banned_g and 0xFFD32F2F or 0xFF1E88E5)
-        card.addView(gtitle)
-
-        local creator_line = tostring(mem_cnt) .. " members • Creator: " .. getVerifiedName(g.creator or "")
-        if not is_banned_g and tostring(g.description or "") ~= "" then
-          creator_line = creator_line .. " • " .. tostring(g.description)
-        end
-        card.addView(makeText(creator_line, 12))
-
-        local action_btn
-        if is_banned_g and not isVerifiedUser(current_username) then
-          action_btn = makeButton("Group Banned - Tap to View")
-        elseif is_member or isVerifiedUser(current_username) then
-          action_btn = makeButton("Open Group")
-        elseif is_pending then
-          action_btn = makeButton("Cancel Join Request")
-        elseif g.approval_required == true or g.approval_required == "true" then
-          action_btn = makeButton("Request to Join")
-        else
-          action_btn = makeButton("Join Group")
-        end
-        card.addView(action_btn, LinearLayout.LayoutParams(-1, -2))
-
-        local function handleGroupSelect()
-          if is_banned_g and not isVerifiedUser(current_username) then
-            dialog.dismiss()
-            showBannedGroupDialog(g.id, g, function()
-              showGroupsListDialog()
-            end)
-          elseif is_member or isVerifiedUser(current_username) then
-            dialog.dismiss()
-            openGroupChatDialog(g.id, g)
-          elseif is_pending then
-            http_delete(FIREBASE_URL .. "btp_groups/" .. g.id .. "/join_requests/" .. encodeKey(current_username) .. ".json", function(ok)
-              if ok then
-                showToast("Join request cancelled.")
-                loadAllGroups()
-              end
-            end)
-          elseif g.approval_required == true or g.approval_required == "true" then
-            http_post_or_put(FIREBASE_URL .. "btp_groups/" .. g.id .. "/join_requests/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function(ok)
-              if ok then
-                showToast("Join request sent to group admin.")
-                loadAllGroups()
-              end
-            end)
-          else
-            http_post_or_put(FIREBASE_URL .. "btp_groups/" .. g.id .. "/members/" .. encodeKey(current_username) .. ".json", "PUT", current_username, function(ok)
-              if ok then
-                showToast("Joined group!")
-                dialog.dismiss()
-                openGroupChatDialog(g.id, g)
-              end
-            end)
-          end
-        end
-
-        action_btn.setOnClickListener(handleGroupSelect)
-        card.setOnClickListener(function()
-          if is_member or isVerifiedUser(current_username) then
-            dialog.dismiss()
-            openGroupChatDialog(g.id, g)
-          else
-            showMessage(
-              gtitle_txt,
-              "Members: " .. tostring(mem_cnt)
-              .. "\nCreator: " .. getVerifiedName(g.creator or "")
-              .. (tostring(g.description or "") ~= "" and ("\nDescription: " .. tostring(g.description)) or "")
-              .. (is_pending and "\nStatus: Join request pending." or "")
-            )
-          end
-        end)
-
-        list_container.addView(card, LinearLayout.LayoutParams(-1, -2))
+  function loadAllGroups()
+    local cached_grps = loadOfflineCache("btp_groups_list_cache")
+    if cached_grps then
+      renderGroupsFromRaw(cached_grps)
+    else
+      list_container.addView(makeText("Loading groups...", 14))
+    end
+    if not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "btp_groups.json", function(s_g, r_g)
+      if s_g and r_g and r_g ~= "null" then
+        saveOfflineCache("btp_groups_list_cache", r_g)
+        renderGroupsFromRaw(r_g)
+      elseif not cached_grps then
+        renderGroupsFromRaw(nil)
       end
     end)
   end
@@ -6044,1392 +6510,2698 @@ function showGroupsListDialog()
   end)
 
   loadAllGroups()
+endend
+-- ========================================================
+-- BTP ASSISTANT ENGINE & PERSONAL AUTO-REPLY SYSTEM
+-- ========================================================
+
+local assistantTaskCounter = 0
+_G.BtpAssistantAudioCallbacks = {}
+
+function onBtpAssistantAudioDone(taskId, success, outPath)
+  local cb = _G.BtpAssistantAudioCallbacks[taskId]
+  if cb then
+    _G.BtpAssistantAudioCallbacks[taskId] = nil
+    cb(success, outPath)
+  end
+end
+
+local function stripAssistantMarkdownEmojis(str)
+  local s = tostring(str or "")
+  s = s:gsub("```.-```", " Code block generated. ")
+  s = s:gsub("[\240-\244][\128-\191][\128-\191][\128-\191]", "")
+  s = s:gsub("[%*%#`_~]", " ")
+  s = s:gsub("%s+", " "):gsub("^%s*(.-)%s*$", "%1")
+  return s
+end
+
+local function enforceBtpAssistantIdentity(replyStr)
+  local s = tostring(replyStr or "")
+  s = s:gsub("[Cc][Hh][Aa][Tt]%s*[Gg][Pp][Tt]", "BTP Assistant")
+  s = s:gsub("[Oo][Pp][Ee][Nn]%s*[Aa][Ii]", "Blind Tech Power Hub")
+  s = s:gsub("[Gg][Pp][Tt]%-%d+[%w%.]*", "BTP Assistant")
+  return s
+end
+
+local function splitAssistantChunks(str, maxLen)
+  local chunks = {}
+  local clean = stripAssistantMarkdownEmojis(str)
+  while string.len(clean) > 0 do
+    if string.len(clean) <= maxLen then
+      table.insert(chunks, clean)
+      break
+    end
+    local cutPos = maxLen
+    local spacePos = clean:sub(1, maxLen):match(".*()%s")
+    if spacePos and spacePos > 40 then
+      cutPos = spacePos
+    end
+    local piece = trim(clean:sub(1, cutPos))
+    if piece ~= "" then
+      table.insert(chunks, piece)
+    end
+    clean = trim(clean:sub(cutPos + 1))
+  end
+  return chunks
+end
+
+local function generateAssistantSpeechFile(text, langCode, outPath, callback)
+  assistantTaskCounter = assistantTaskCounter + 1
+  local tId = "btp_ast_" .. tostring(assistantTaskCounter)
+  _G.BtpAssistantAudioCallbacks[tId] = callback
+
+  local chunks = splitAssistantChunks(text, 170)
+  if #chunks == 0 then
+    callback(false, outPath)
+    return
+  end
+
+  local encodedChunks = {}
+  for _, c in ipairs(chunks) do
+    table.insert(encodedChunks, URLEncoder.encode(c, "UTF-8"))
+  end
+  local joined = table.concat(encodedChunks, "|||")
+  local tl = langCode or "hi"
+
+  thread(function(tid, encStr, lang, dest)
+    require "import"
+    import "java.net.*"
+    import "java.io.*"
+
+    local okRun, written = pcall(function()
+      local fos = FileOutputStream(dest)
+      local total = 0
+      for part in string.gmatch(encStr, "([^|||]+)") do
+        local u = URL("https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=" .. lang .. "&q=" .. part)
+        local conn = u.openConnection()
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36")
+        conn.setConnectTimeout(10000)
+        conn.setReadTimeout(15000)
+        if conn.getResponseCode() == 200 then
+          local inp = conn.getInputStream()
+          local buf = byte[4096]
+          local n = inp.read(buf)
+          while n ~= -1 do
+            fos.write(buf, 0, n)
+            total = total + n
+            n = inp.read(buf)
+          end
+          inp.close()
+        end
+      end
+      fos.flush()
+      fos.close()
+      return total
+    end)
+
+    call("onBtpAssistantAudioDone", tid, (okRun and (tonumber(written) or 0) > 150), dest)
+  end, tId, joined, tl, outPath)
+end
+
+local function buildTrainedKnowledgeContext(queryStr, extra_list)
+  local combined = {}
+  if type(extra_list) == "table" then
+    for _, it in ipairs(extra_list) do table.insert(combined, it) end
+  end
+  if type(assistant_trained_items) == "table" then
+    for _, it in ipairs(assistant_trained_items) do table.insert(combined, it) end
+  end
+  if #combined == 0 then
+    return ""
+  end
+  local qLow = trim(tostring(queryStr or "")):lower()
+  local out = {}
+  for _, it in ipairs(combined) do
+    local kLow = trim(tostring(it.q or "")):lower()
+    if kLow ~= "" and (qLow == "" or qLow:find(kLow, 1, true) or kLow:find(qLow, 1, true)) then
+      table.insert(out, tostring(it.q or "") .. ": " .. tostring(it.a or ""))
+      if #out >= 3 then break end
+    end
+  end
+  if #out == 0 then
+    for i = 1, math.min(2, #combined) do
+      local it = combined[i]
+      table.insert(out, tostring(it.q or "") .. ": " .. tostring(it.a or ""))
+    end
+  end
+  return table.concat(out, " | ")
+end
+
+local function findLocalTrainedAnswer(queryStr, extra_list)
+  local qLow = trim(tostring(queryStr or "")):lower()
+  if qLow == "" then return nil end
+
+  if type(extra_list) == "table" then
+    for _, item in ipairs(extra_list) do
+      local kLow = trim(tostring(item.q or "")):lower()
+      if kLow ~= "" and (qLow == kLow or qLow:find(kLow, 1, true)) then
+        return tostring(item.a or "")
+      end
+    end
+  end
+
+  for _, item in ipairs(assistant_trained_items) do
+    local kLow = trim(tostring(item.q or "")):lower()
+    if kLow ~= "" and (qLow == kLow or qLow:find(kLow, 1, true)) then
+      return tostring(item.a or "")
+    end
+  end
+
+  if qLow == "hi" or qLow == "hello" or qLow == "namaste" or qLow == "salam" or qLow == "assalamualaikum" then
+    return "Namaste " .. ((current_username ~= "" and current_username) or "Dost") .. "! Main BTP Assistant hoon. Aap mujhse AndroLua code, app features, ya koi bhi sawal poochh sakte hain."
+  elseif qLow:find("tum kaun ho", 1, true) or qLow:find("who are you", 1, true) or qLow:find("apna naam", 1, true) or qLow:find("your name", 1, true) or qLow:find("tumhara naam", 1, true) or qLow:find("naam kya", 1, true) then
+    return "Mera naam BTP Assistant hai. Mujhe Ibrahim Ansari ne Blind Tech Power Hub ke liye banaya hai."
+  elseif qLow:find("developer", 1, true) or qLow:find("kisne banaya", 1, true) then
+    return "Is app aur BTP Assistant ko Ibrahim Ansari ne develop kiya hai."
+  elseif qLow:find("version", 1, true) then
+    return "Aap abhi version " .. CURRENT_VERSION .. " istemal kar rahe hain."
+  end
+  return nil
+end
+
+local function isFeedbackRequestText(queryStr)
+  local l = trim(tostring(queryStr or "")):lower()
+  return (l:find("feedback", 1, true) ~= nil or l:find("sugjav", 1, true) ~= nil or l:find("sujhav", 1, true) or l:find("report", 1, true) ~= nil)
+end
+
+local function submitAssistantFeedbackToFirebase(userName, feedbackText, onDone)
+  local entry = {
+    user = userName,
+    message = feedbackText,
+    timestamp = os.date("%I:%M %p, %d %b"),
+    timestamp_raw = os.date("%Y%m%d%H%M%S")
+  }
+  http_post_or_put(FIREBASE_URL .. "settings/assistant_feedbacks.json", "POST", entry, function(ok)
+    if onDone then onDone(ok) end
+  end)
+end
+
+local function sanitizeAiResponseText(rawTxt)
+  local t = trim(tostring(rawTxt or ""))
+  if t == "" then return "" end
+  local ok, parsed = pcall(cjson.decode, t)
+  if ok and type(parsed) == "table" then
+    t = parsed.reply or parsed.response or parsed.message or parsed.text or parsed.answer or ""
+    t = trim(tostring(t))
+  end
+  local low = t:lower()
+  if low == "" or low == "null" or low:find("<!doctype html", 1, true) or low:find("<html", 1, true) or low:find("error 5", 1, true) or low:find("rate limit", 1, true) then
+    return ""
+  end
+  return enforceBtpAssistantIdentity(t)
+end
+
+local function fetchAssistantReplyWithFallback(modelObj, promptText, fallbackQuery, callback, extra_trained)
+  local matchedLocal = findLocalTrainedAnswer(fallbackQuery, extra_trained)
+  if matchedLocal and matchedLocal ~= "" then
+    callback(true, enforceBtpAssistantIdentity(matchedLocal))
+    return
+  end
+
+  if not isNetworkAvailable() then
+    callback(false, "")
+    return
+  end
+
+  local mId = (modelObj and modelObj.backendId) or "gemini-flash"
+  local identityGuard = "STRICT RULE: Your name is BTP Assistant, created by Ibrahim Ansari for Blind Tech Power Hub. NEVER say you are ChatGPT or OpenAI. "
+  local fullPrompt = identityGuard .. promptText
+  local encodedPrompt = URLEncoder.encode(fullPrompt, "UTF-8")
+  local encodedRawQ = URLEncoder.encode(identityGuard .. "User asks: " .. tostring(fallbackQuery or promptText):sub(1, 250), "UTF-8")
+
+  local url1 = "https://ai-hub.schoolofmindlight.workers.dev/?model=" .. URLEncoder.encode(mId, "UTF-8") .. "&chat=" .. encodedPrompt
+  Http.get(url1, nil, "UTF-8", nil, function(code1, content1)
+    local r1 = (code1 == 200) and sanitizeAiResponseText(content1) or ""
+    if r1 ~= "" then
+      callback(true, r1)
+      return
+    end
+
+    local url2 = "https://text.pollinations.ai/" .. encodedRawQ
+    Http.get(url2, nil, "UTF-8", nil, function(code2, content2)
+      local r2 = (code2 == 200) and sanitizeAiResponseText(content2) or ""
+      if r2 ~= "" then
+        callback(true, r2)
+        return
+      end
+
+      local url3 = "https://ai-hub.schoolofmindlight.workers.dev/?model=gemini-flash&chat=" .. encodedRawQ
+      Http.get(url3, nil, "UTF-8", nil, function(code3, content3)
+        local r3 = (code3 == 200) and sanitizeAiResponseText(content3) or ""
+        if r3 ~= "" then
+          callback(true, r3)
+        else
+          callback(false, "")
+        end
+      end)
+    end)
+  end)
 end
 
 -- ========================================================
--- CHAT HUB
+-- PERSONAL CHAT ASSISTANT SETUP & TRAINING (ALL USERS)
 -- ========================================================
 
-function showResourceChatDialog()
-  local layout = makeLayout(true, 15)
+function showPersonalAssistantSetupDialog()
+  if current_username == "" then
+    showToast("Please login first.")
+    return
+  end
 
-  local top_actions = makeLayout(false, 4)
-  local more_chat_btn = makeButton("More Options (Create Group)")
-  top_actions.addView(more_chat_btn, LinearLayout.LayoutParams(-1, -2))
-  layout.addView(top_actions)
+  local layout = makeLayout(true, 14)
+  local is_enabled = sp.getBoolean("personal_ast_enabled", false)
+  local away_msg = tostring(sp.getString("personal_ast_away_msg", "Main abhi offline hoon, meri jagah BTP Assistant reply kar raha hai."))
+  local raw_personal_train = tostring(sp.getString("personal_ast_training_json", "[]"))
+  local ok_pt, personal_train_list = pcall(cjson.decode, raw_personal_train)
+  if not ok_pt or type(personal_train_list) ~= "table" then
+    personal_train_list = {}
+  end
 
-  local assistant_card = makeLayout(true, 12)
-  assistant_card.setBackgroundColor(0xFFEDE7F6)
-  local ast_title = makeText("BTP Assistant", 16)
-  ast_title.setTextColor(0xFF4A148C)
-  assistant_card.addView(ast_title)
-  assistant_card.addView(makeText("Smart help for app features, Lua code & Q&A", 12))
-  layout.addView(assistant_card, LinearLayout.LayoutParams(-1, -2))
+  local status_tv = makeText("Personal Chat Assistant: " .. (is_enabled and "ACTIVE (ON)" or "INACTIVE (OFF)"), 15)
+  status_tv.setTextColor(is_enabled and 0xFF2E7D32 or 0xFFD32F2F)
+  layout.addView(status_tv)
 
-  local scroll = ScrollView(activity)
-  local users_container = makeLayout(true, 10)
-  scroll.addView(users_container)
-  layout.addView(scroll, LinearLayout.LayoutParams(-1, 470))
+  layout.addView(makeText("Jab aap offline honge, tab aapki personal chat mein BTP Assistant automatically reply karega. Online aate hi auto-reply band ho jayega.", 12))
 
-  users_container.addView(makeText("Loading chats...", 14))
+  local toggle_btn = makeButton(is_enabled and "Turn OFF Personal Assistant" or "Turn ON Personal Assistant")
+  layout.addView(toggle_btn)
 
-  local dialog = AlertDialog.Builder(activity)
-    .setTitle("Chat")
-    .setView(layout)
-    .setPositiveButton("Close", nil)
-    .create()
+  local away_inp = EditText(activity)
+  away_inp.setHint("Custom Offline Greeting / Away Note")
+  away_inp.setText(away_msg)
+  layout.addView(away_inp)
 
-  assistant_card.setOnClickListener(function()
-    pcall(function() dialog.dismiss() end)
-    openBTPAssistantDialog()
+  layout.addView(makeText("Train Your Personal Assistant (Add Custom Q&A):", 14))
+  local q_inp = EditText(activity)
+  q_inp.setHint("Agar koi yeh poochhe (e.g. kahan ho, number do)")
+  local a_inp = EditText(activity)
+  a_inp.setHint("Toh assistant yeh jawab de")
+  a_inp.setMinLines(2)
+  layout.addView(q_inp)
+  layout.addView(a_inp)
+
+  local add_qa_btn = makeButton("Add Training Q&A")
+  layout.addView(add_qa_btn)
+
+  local list_tv = makeText("", 12)
+  local sc = ScrollView(activity)
+  sc.addView(list_tv)
+  layout.addView(sc, LinearLayout.LayoutParams(-1, 180))
+
+  local function refreshTrainPreview()
+    if #personal_train_list == 0 then
+      list_tv.setText("No personal training added yet.")
+    else
+      local lines = {}
+      for i, item in ipairs(personal_train_list) do
+        table.insert(lines, tostring(i) .. ". Q: " .. tostring(item.q or "") .. "\n    A: " .. tostring(item.a or ""))
+      end
+      list_tv.setText(table.concat(lines, "\n\n"))
+    end
+  end
+  refreshTrainPreview()
+
+  local function syncPersonalAssistantToFirebase(enabled_state)
+    local clean_away = trim(away_inp.getText())
+    if clean_away == "" then
+      clean_away = "Main abhi offline hoon, meri jagah BTP Assistant reply kar raha hai."
+    end
+    sp.edit()
+      .putBoolean("personal_ast_enabled", enabled_state)
+      .putString("personal_ast_away_msg", clean_away)
+      .putString("personal_ast_training_json", cjson.encode(personal_train_list))
+      .apply()
+
+    local fb_payload = {
+      enabled = enabled_state,
+      away_message = clean_away,
+      training = personal_train_list,
+      updated_epoch = os.time()
+    }
+    http_post_or_put(FIREBASE_URL .. "personal_assistants/" .. encodeKey(current_username) .. ".json", "PUT", fb_payload, function() end)
+  end
+
+  toggle_btn.setOnClickListener(function()
+    is_enabled = not is_enabled
+    status_tv.setText("Personal Chat Assistant: " .. (is_enabled and "ACTIVE (ON)" or "INACTIVE (OFF)"))
+    status_tv.setTextColor(is_enabled and 0xFF2E7D32 or 0xFFD32F2F)
+    toggle_btn.setText(is_enabled and "Turn OFF Personal Assistant" or "Turn ON Personal Assistant")
+    syncPersonalAssistantToFirebase(is_enabled)
+    showToast(is_enabled and "Personal Chat Assistant Activated!" or "Personal Chat Assistant Turned OFF.")
   end)
 
-  dialog.show()
+  add_qa_btn.setOnClickListener(function()
+    local qt = trim(q_inp.getText())
+    local at = trim(a_inp.getText())
+    if qt == "" or at == "" then
+      showToast("Question aur Answer dono likhein.")
+      return
+    end
+    table.insert(personal_train_list, { q = qt, a = at })
+    q_inp.setText("")
+    a_inp.setText("")
+    refreshTrainPreview()
+    syncPersonalAssistantToFirebase(is_enabled)
+    showToast("Personal Assistant trained!")
+  end)
 
-  more_chat_btn.setOnClickListener(function()
-    local opts = {"Create New Group", "View All Groups"}
-    AlertDialog.Builder(activity)
-      .setTitle("More Options")
-      .setItems(opts, DialogInterface.OnClickListener{
-        onClick = function(d, w)
-          if w == 0 then
-            showCreateGroupDialog(function()
-              dialog.dismiss()
-              showGroupsListDialog()
+  AlertDialog.Builder(activity)
+    .setTitle("Personal Chat BTP Assistant")
+    .setView(layout)
+    .setPositiveButton("Save & Close", DialogInterface.OnClickListener{
+      onClick = function()
+        syncPersonalAssistantToFirebase(is_enabled)
+      end
+    })
+    .setNegativeButton("Clear Training", DialogInterface.OnClickListener{
+      onClick = function()
+        personal_train_list = {}
+        syncPersonalAssistantToFirebase(is_enabled)
+        showToast("Personal training cleared.")
+      end
+    })
+    .show()
+end
+
+local function openAssistantLiveVoiceDialog()
+  if assistant_is_locked and not isDeveloper(current_username) then
+    showMessage("BTP Assistant", "Assistant is currently locked.")
+    return
+  end
+
+  local uname = (current_username ~= "" and current_username) or "User"
+  local isLive = true
+  local isMuted = false
+  local liveRec = nil
+  local liveMp = nil
+  local turnCnt = 0
+
+  playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+
+  local box = makeLayout(true, 16)
+  box.addView(makeText("BTP Assistant Live Voice Mode", 19))
+  box.addView(makeText("Speak naturally with BTP Assistant. Tap Mute or Close anytime.", 13))
+
+  local statusTv = makeText("Status: Connecting...", 15)
+  statusTv.setTextColor(0xFF0D47A1)
+  statusTv.setPadding(0, 8, 0, 8)
+  box.addView(statusTv)
+
+  local logTv = makeText("Ready to listen.", 14)
+  logTv.setPadding(12, 12, 12, 14)
+  logTv.setBackgroundColor(0xFFE8F5E9)
+  box.addView(logTv)
+
+  local muteBtn = makeButton("Mute Microphone")
+  muteBtn.setContentDescription("Mute Microphone")
+  box.addView(muteBtn, LinearLayout.LayoutParams(-1, -2))
+
+  local function stopLiveMic()
+    pcall(function()
+      if liveRec then
+        liveRec.setRecognitionListener(nil)
+        liveRec.cancel()
+        liveRec.destroy()
+        liveRec = nil
+      end
+    end)
+  end
+
+  local function stopLiveMp()
+    pcall(function()
+      if liveMp then
+        if liveMp.isPlaying() then liveMp.stop() end
+        liveMp.release()
+        liveMp = nil
+      end
+    end)
+  end
+
+  local startLiveMicLoop
+
+  local function speakLiveReply(txt)
+    if not isLive then return end
+    local clean = stripAssistantMarkdownEmojis(enforceBtpAssistantIdentity(txt))
+    statusTv.setText("Status: Speaking...")
+    logTv.setText("BTP Assistant: " .. clean)
+    turnCnt = turnCnt + 1
+    local outP = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_live_" .. tostring(turnCnt) .. ".mp3"
+    generateAssistantSpeechFile(clean, "hi", outP, function(ok, savedP)
+      if not isLive then return end
+      if ok then
+        stopLiveMp()
+        local pOk = pcall(function()
+          liveMp = MediaPlayer()
+          liveMp.setDataSource(savedP)
+          liveMp.prepare()
+          liveMp.start()
+          liveMp.setOnCompletionListener(MediaPlayer.OnCompletionListener{
+            onCompletion = function()
+              stopLiveMp()
+              if isLive and not isMuted then
+                Handler(Looper.getMainLooper()).postDelayed(Runnable{
+                  run = function() startLiveMicLoop() end
+                }, 400)
+              end
+            end
+          })
+        end)
+        if not pOk and isLive and not isMuted then
+          startLiveMicLoop()
+        end
+      elseif isLive and not isMuted then
+        startLiveMicLoop()
+      end
+    end)
+  end
+
+  startLiveMicLoop = function()
+    if (not isLive) or isMuted or not isNetworkAvailable() then return end
+    stopLiveMic()
+    statusTv.setText("Status: Listening...")
+    pcall(function()
+      liveRec = SpeechRecognizer.createSpeechRecognizer(activity)
+      local it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+      it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+      liveRec.setRecognitionListener(RecognitionListener{
+        onReadyForSpeech = function() if isLive and not isMuted then statusTv.setText("Status: Speak now...") end end,
+        onBeginningOfSpeech = function() end,
+        onRmsChanged = function() end,
+        onBufferReceived = function() end,
+        onEndOfSpeech = function() end,
+        onError = function()
+          if isLive and not isMuted then
+            Handler(Looper.getMainLooper()).postDelayed(Runnable{
+              run = function() startLiveMicLoop() end
+            }, 600)
+          end
+        end,
+        onResults = function(res)
+          local matches = res.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+          local spoken = (matches and matches.size() > 0) and tostring(matches.get(0)) or ""
+          if spoken == "" then
+            if isLive and not isMuted then startLiveMicLoop() end
+            return
+          end
+          logTv.setText(uname .. ": " .. spoken)
+          statusTv.setText("Status: Thinking...")
+          local trainedCtx = buildTrainedKnowledgeContext(spoken)
+          local prompt = "You are BTP Assistant (" .. APP_TITLE .. "). " .. (trainedCtx ~= "" and (trainedCtx .. ". ") or "") .. "Q: " .. spoken .. " (Short clear answer, no emojis)"
+          fetchAssistantReplyWithFallback({backendId = "gemini-flash"}, prompt, spoken, function(ok, reply)
+            if not isLive then return end
+            if ok and reply ~= "" then
+              speakLiveReply(reply)
+            else
+              speakLiveReply("Abhi network slow hai, kripya ek baar phir boliye.")
+            end
+          end)
+        end,
+        onPartialResults = function() end,
+        onEvent = function() end
+      })
+      liveRec.startListening(it)
+    end)
+  end
+
+  muteBtn.setOnClickListener(function()
+    isMuted = not isMuted
+    if isMuted then
+      stopLiveMic()
+      muteBtn.setText("Unmute Microphone")
+      muteBtn.setContentDescription("Unmute Microphone")
+      statusTv.setText("Status: Microphone Muted")
+    else
+      muteBtn.setText("Mute Microphone")
+      muteBtn.setContentDescription("Mute Microphone")
+      startLiveMicLoop()
+    end
+  end)
+
+  local dlg = AlertDialog.Builder(activity)
+    .setTitle("BTP Assistant Live")
+    .setView(box)
+    .setCancelable(false)
+    .setNegativeButton("End Live Mode", DialogInterface.OnClickListener{
+      onClick = function()
+        isLive = false
+        stopLiveMic()
+        stopLiveMp()
+      end
+    })
+    .create()
+  dlg.show()
+
+  Handler(Looper.getMainLooper()).postDelayed(Runnable{
+    run = function()
+      if isLive then
+        speakLiveReply("Hello " .. uname .. ", main BTP Assistant hoon. Kuchh bhi poochhiye.")
+      end
+    end
+  }, 800)
+end
+
+function openBTPAssistantDialog()
+  if notifyServerDownIfNeeded() then return end
+
+  local uname = (current_username ~= "" and current_username) or "User"
+  local ast_models = {
+    {displayName = "BTP Flash (Fast)", backendId = "gemini-flash"},
+    {displayName = "BTP 1.4 (Default)", backendId = "gpt-sol"},
+    {displayName = "Blind Tech Power Pro", backendId = "gpt-5.5"},
+    {displayName = "BTP Ultra 2.0", backendId = "claude-sonnet"},
+    {displayName = "BTP Vision & Smart", backendId = "gemini-pro"}
+  }
+  local model_idx = sp.getInt("btp_ast_model_idx", 1)
+  local mem_enabled = sp.getBoolean("btp_ast_mem_on", true)
+  local auto_tts = sp.getBoolean("btp_ast_auto_tts", false)
+  local saved_mem = tostring(sp.getString("btp_ast_memory", ""))
+  local chatHistory = {}
+  if mem_enabled and saved_mem ~= "" then
+    table.insert(chatHistory, saved_mem:sub(-240))
+  end
+
+  local astPlayer = nil
+  local activeListenBtn = nil
+  local replySeq = 0
+  local isGenerating = false
+  local reqSeq = 0
+  local isMicBusy = false
+  local micRec = nil
+  local awaitingFeedbackInput = false
+
+  playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+
+  local root = makeLayout(true, 14)
+
+  local topBar = makeLayout(false, 4)
+  topBar.setGravity(Gravity.CENTER_VERTICAL)
+  local titleTv = makeText("BTP Assistant", 18)
+  titleTv.setTextColor(0xFF0D47A1)
+  topBar.addView(titleTv, LinearLayout.LayoutParams(0, -2, 1))
+
+  local moreBtn = makeButton("More Options")
+  topBar.addView(moreBtn, LinearLayout.LayoutParams(-2, -2))
+  root.addView(topBar)
+
+  local lockedBanner = makeText("Assistant is currently locked.", 14)
+  lockedBanner.setTextColor(0xFFD32F2F)
+  lockedBanner.setPadding(8, 8, 8, 8)
+  lockedBanner.setVisibility(View.GONE)
+  root.addView(lockedBanner)
+
+  local chatScroll = ScrollView(activity)
+  local chatContainer = makeLayout(true, 8)
+  chatScroll.addView(chatContainer)
+  root.addView(chatScroll, LinearLayout.LayoutParams(-1, 340))
+
+  local statusTv = makeText("", 12)
+  statusTv.setTextColor(0xFF1E88E5)
+  statusTv.setVisibility(View.GONE)
+  root.addView(statusTv)
+
+  local function stopAstAudio()
+    pcall(function()
+      if astPlayer then
+        if astPlayer.isPlaying() then astPlayer.stop() end
+        astPlayer.release()
+        astPlayer = nil
+      end
+    end)
+    if activeListenBtn then
+      pcall(function() activeListenBtn.setText("Listen") end)
+      activeListenBtn = nil
+    end
+  end
+
+  local function toggleAstAudio(filePath, btn)
+    if activeListenBtn == btn and astPlayer ~= nil then
+      stopAstAudio()
+      return
+    end
+    stopAstAudio()
+    local ok = pcall(function()
+      astPlayer = MediaPlayer()
+      astPlayer.setDataSource(filePath)
+      astPlayer.prepare()
+      astPlayer.start()
+      activeListenBtn = btn
+      btn.setText("Stop Listening")
+      astPlayer.setOnCompletionListener(MediaPlayer.OnCompletionListener{
+        onCompletion = function()
+          stopAstAudio()
+        end
+      })
+    end)
+    if not ok then
+      stopAstAudio()
+      showToast("Unable to play voice.")
+    end
+  end
+
+  local function extractLuaCode(txt)
+    return txt:match("```[%w]*\n(.-)\n?```") or txt:match("```(.-)```")
+  end
+
+  local function appendAstBubble(sender, textStr, isReply, allowAutoPlay)
+    if isReply then
+      playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+
+    local bubble = makeLayout(true, 8)
+    bubble.setBackgroundColor(isReply and 0xFFE8F5E9 or 0xFFE3F2FD)
+    bubble.setPadding(12, 10, 12, 10)
+    bubble.setFocusable(true)
+
+    local finalTxt = isReply and enforceBtpAssistantIdentity(textStr) or tostring(textStr or "")
+    local bodyTv = makeText(sender .. ":\n" .. finalTxt, 14)
+    bodyTv.setTextIsSelectable(true)
+    bubble.addView(bodyTv)
+
+    if isReply then
+      local row = makeLayout(false, 4)
+      local listenBtn = makeButton("Preparing Voice...")
+      listenBtn.setEnabled(false)
+      row.addView(listenBtn)
+
+      local codeSnippet = extractLuaCode(finalTxt)
+      if codeSnippet and codeSnippet ~= "" then
+        local copyBtn = makeButton("Copy Code")
+        copyBtn.setOnClickListener(function()
+          copyCode(codeSnippet)
+        end)
+        row.addView(copyBtn)
+      end
+
+      bubble.addView(row)
+
+      replySeq = replySeq + 1
+      local mp3Path = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_ast_reply_" .. tostring(replySeq) .. ".mp3"
+      generateAssistantSpeechFile(finalTxt, "hi", mp3Path, function(ok, savedP)
+        if ok then
+          listenBtn.setText("Listen")
+          listenBtn.setEnabled(true)
+          listenBtn.setOnClickListener(function()
+            toggleAstAudio(savedP, listenBtn)
+          end)
+          if allowAutoPlay and auto_tts then
+            toggleAstAudio(savedP, listenBtn)
+          end
+        else
+          listenBtn.setText("Retry Voice")
+          listenBtn.setEnabled(true)
+          listenBtn.setOnClickListener(function()
+            generateAssistantSpeechFile(finalTxt, "hi", mp3Path, function(ok2, p2)
+              if ok2 then
+                listenBtn.setText("Listen")
+                toggleAstAudio(p2, listenBtn)
+              end
             end)
-          else
-            dialog.dismiss()
-            showGroupsListDialog()
+          end)
+        end
+      end)
+    end
+
+    chatContainer.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+    chatScroll.post(Runnable{
+      run = function() chatScroll.fullScroll(ScrollView.FOCUS_DOWN) end
+    })
+  end
+
+  local bottomRow = makeLayout(false, 4)
+  bottomRow.setGravity(Gravity.CENTER_VERTICAL)
+
+  local msgInput = EditText(activity)
+  msgInput.setHint("Ask anything, type a question, or explore Lua...")
+  bottomRow.addView(msgInput, LinearLayout.LayoutParams(0, -2, 1))
+
+  local micBtn = makeButton("Microphone")
+  micBtn.setContentDescription("Microphone")
+  bottomRow.addView(micBtn, LinearLayout.LayoutParams(-2, -2))
+
+  local sendBtn = makeButton("Send")
+  bottomRow.addView(sendBtn, LinearLayout.LayoutParams(-2, -2))
+  root.addView(bottomRow)
+
+  local function refreshAssistantLockView()
+    if assistant_is_locked and not isDeveloper(current_username) then
+      lockedBanner.setVisibility(View.VISIBLE)
+      bottomRow.setVisibility(View.GONE)
+    else
+      lockedBanner.setVisibility(View.GONE)
+      bottomRow.setVisibility(View.VISIBLE)
+    end
+  end
+
+  syncServerAndRoomSettings(function()
+    refreshAssistantLockView()
+  end)
+
+  appendAstBubble("BTP Assistant", "Hello " .. uname .. "! Main BTP Assistant hoon. Chhote-mote sawal, app features, ya Lua ke baare mein poochhiye.", true, false)
+
+  local function runAssistantQuery(userQuery)
+    if notifyServerDownIfNeeded() then return end
+    if assistant_is_locked and not isDeveloper(current_username) then
+      refreshAssistantLockView()
+      showToast("Assistant is currently locked.")
+      return
+    end
+
+    if isGenerating then
+      isGenerating = false
+      reqSeq = reqSeq + 1
+      statusTv.setVisibility(View.GONE)
+      sendBtn.setText("Send")
+      return
+    end
+
+    local q = trim(userQuery)
+    if q == "" then return end
+
+    playSound(SOUND_SEND, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    msgInput.setText("")
+    appendAstBubble(uname, q, false, false)
+
+    if awaitingFeedbackInput then
+      awaitingFeedbackInput = false
+      submitAssistantFeedbackToFirebase(uname, q, function(ok)
+        if ok then
+          appendAstBubble("BTP Assistant", "Aapka feedback receive ho gaya hai. Main isse admin/developer tak pahuncha dunga.", true, true)
+        else
+          appendAstBubble("BTP Assistant", "Feedback save karne mein problem aayi, kripya thodi der baad try karein.", true, false)
+        end
+      end)
+      return
+    end
+
+    if isFeedbackRequestText(q) then
+      awaitingFeedbackInput = true
+      appendAstBubble("BTP Assistant", "Zaroor! Aap apna feedback yahan likh kar ya bol kar bhej sakte hain.", true, true)
+      return
+    end
+
+    isGenerating = true
+    reqSeq = reqSeq + 1
+    local curReq = reqSeq
+    sendBtn.setText("Stop")
+    statusTv.setText("Thinking...")
+    statusTv.setVisibility(View.VISIBLE)
+
+    local chosenModel = ast_models[model_idx] or ast_models[1]
+    local trainedCtx = buildTrainedKnowledgeContext(q)
+    local recentCtx = (mem_enabled and #chatHistory > 0) and ("Prev: " .. table.concat(chatHistory, " | ") .. ". ") or ""
+    local sysPrompt = "You are BTP Assistant in " .. APP_TITLE .. " built by Ibrahim Ansari. Never call yourself ChatGPT. "
+      .. (trainedCtx ~= "" and ("Info: " .. trainedCtx .. ". ") or "")
+      .. recentCtx
+      .. "Q: " .. q .. "\nAnswer directly and concisely in clear Hindi/English without emojis."
+    if #sysPrompt > 480 then sysPrompt = sysPrompt:sub(-480) end
+
+    fetchAssistantReplyWithFallback(chosenModel, sysPrompt, q, function(ok, reply)
+      if (not isGenerating) or (curReq ~= reqSeq) then return end
+      isGenerating = false
+      statusTv.setVisibility(View.GONE)
+      sendBtn.setText("Send")
+
+      if ok and reply ~= "" then
+        local cleanReply = enforceBtpAssistantIdentity(trim(tostring(reply)))
+        appendAstBubble("BTP Assistant", cleanReply, true, true)
+        if mem_enabled then
+          table.insert(chatHistory, q:sub(1, 60) .. " -> " .. cleanReply:sub(1, 80))
+          if #chatHistory > 2 then
+            table.remove(chatHistory, 1)
+          end
+          sp.edit().putString("btp_ast_memory", table.concat(chatHistory, " | ")).apply()
+        end
+      else
+        appendAstBubble("BTP Assistant", "Abhi AI server busy hai. Kripya apna internet check karein ya 5 second baad dubara poochhiye.", true, false)
+      end
+    end)
+  end
+
+  sendBtn.setOnClickListener(function()
+    runAssistantQuery(tostring(msgInput.getText()))
+  end)
+
+  micBtn.setOnClickListener(function()
+    if assistant_is_locked and not isDeveloper(current_username) then
+      refreshAssistantLockView()
+      showToast("Assistant is currently locked.")
+      return
+    end
+    if isMicBusy then
+      isMicBusy = false
+      micBtn.setText("Microphone")
+      pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
+      return
+    end
+    isMicBusy = true
+    stopAstAudio()
+    local okMic = pcall(function()
+      micRec = SpeechRecognizer.createSpeechRecognizer(activity)
+      local it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+      it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+      it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+      local done = false
+      micRec.setRecognitionListener(RecognitionListener{
+        onReadyForSpeech = function() if not done then micBtn.setText("Listening...") end end,
+        onBeginningOfSpeech = function() end,
+        onRmsChanged = function() end,
+        onBufferReceived = function() end,
+        onEndOfSpeech = function() micBtn.setText("Microphone") end,
+        onError = function()
+          if done then return end
+          done = true
+          isMicBusy = false
+          micBtn.setText("Microphone")
+          pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
+        end,
+        onResults = function(res)
+          if done then return end
+          done = true
+          isMicBusy = false
+          micBtn.setText("Microphone")
+          local matches = res.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+          pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
+          if matches and matches.size() > 0 then
+            runAssistantQuery(tostring(matches.get(0)))
+          end
+        end,
+        onPartialResults = function() end,
+        onEvent = function() end
+      })
+      micRec.startListening(it)
+    end)
+    if not okMic then
+      isMicBusy = false
+      micBtn.setText("Microphone")
+      showToast("Microphone unavailable.")
+    end
+  end)
+
+  moreBtn.setOnClickListener(function()
+    local curM = ast_models[model_idx] or ast_models[1]
+    local opts = {
+      "Open BTP Live Voice Mode",
+      "Personal Chat Assistant Setup & Train",
+      "Change Model (" .. curM.displayName .. ")",
+      "Auto TTS: " .. (auto_tts and "ON" or "OFF"),
+      "Memory: " .. (mem_enabled and "ON" or "OFF"),
+      "Send Feedback to Assistant",
+      "Clear Assistant Memory",
+      "About BTP Assistant"
+    }
+    AlertDialog.Builder(activity)
+      .setTitle("Assistant Options")
+      .setItems(opts, DialogInterface.OnClickListener{
+        onClick = function(_, w)
+          if w == 0 then
+            stopAstAudio()
+            openAssistantLiveVoiceDialog()
+          elseif w == 1 then
+            showPersonalAssistantSetupDialog()
+          elseif w == 2 then
+            local names = {}
+            for _, m in ipairs(ast_models) do table.insert(names, m.displayName) end
+            AlertDialog.Builder(activity)
+              .setTitle("Select AI Model")
+              .setItems(names, DialogInterface.OnClickListener{
+                onClick = function(_, mIdx)
+                  model_idx = mIdx + 1
+                  sp.edit().putInt("btp_ast_model_idx", model_idx).apply()
+                  showToast("Model: " .. ast_models[model_idx].displayName)
+                end
+              }).show()
+          elseif w == 3 then
+            auto_tts = not auto_tts
+            sp.edit().putBoolean("btp_ast_auto_tts", auto_tts).apply()
+            showToast("Auto TTS: " .. (auto_tts and "ON" or "OFF"))
+          elseif w == 4 then
+            mem_enabled = not mem_enabled
+            sp.edit().putBoolean("btp_ast_mem_on", mem_enabled).apply()
+            showToast("Memory: " .. (mem_enabled and "ON" or "OFF"))
+          elseif w == 5 then
+            awaitingFeedbackInput = true
+            appendAstBubble("BTP Assistant", "Apna feedback type karein aur Send dabayein.", true, false)
+          elseif w == 6 then
+            chatHistory = {}
+            sp.edit().putString("btp_ast_memory", "").apply()
+            showToast("Assistant memory cleared.")
+          elseif w == 7 then
+            showMessage("About BTP Assistant", "Name: BTP Assistant\nPlatform: " .. APP_TITLE .. "\nDeveloper: " .. APP_DEV .. "\nModel: " .. curM.displayName)
           end
         end
       }).show()
   end)
 
-  syncServerAndRoomSettings(function()
-    http_get(FIREBASE_URL .. "registered_users.json", function(s_reg, r_reg)
-      http_get(FIREBASE_URL .. "user_presence.json", function(s_pres, r_pres)
-        users_container.removeAllViews()
-
-        local online_total = getOnlineUsersSummary(s_pres and r_pres or nil)
-
-        local voice_room_card = makeLayout(true, 12)
-        voice_room_card.setBackgroundColor(0xFFE3F2FD)
-        local vr_title_str = "BTP Voice Room (" .. tostring(online_total) .. " online)"
-        if public_room_locked and not canBypassRoomLock(current_username) then
-          vr_title_str = "BTP Voice Room"
-        elseif public_room_locked then
-          vr_title_str = vr_title_str .. " • Locked"
-        end
-        local vr_title = makeText(vr_title_str, 16)
-        vr_title.setTextColor(0xFF0D47A1)
-        voice_room_card.addView(vr_title)
-        voice_room_card.addView(makeText("Public voice and text room for all members", 12))
-        users_container.addView(voice_room_card, LinearLayout.LayoutParams(-1, -2))
-
-        voice_room_card.setOnClickListener(function()
-          dialog.dismiss()
-          openBtpVoiceRoomDialog()
-        end)
-
-        local groups_card = makeLayout(true, 12)
-        groups_card.setBackgroundColor(0xFFE8F5E9)
-        local grp_title = makeText("View Groups", 16)
-        grp_title.setTextColor(0xFF1B5E20)
-        groups_card.addView(grp_title)
-        users_container.addView(groups_card, LinearLayout.LayoutParams(-1, -2))
-
-        groups_card.setOnClickListener(function()
-          dialog.dismiss()
-          showGroupsListDialog()
-        end)
-
-        local user_map = {}
-
-        if s_reg and r_reg and r_reg ~= "null" then
-          local ok, data = pcall(cjson.decode, r_reg)
-          if ok and type(data) == "table" then
-            for k, v in pairs(data) do
-              local uname = (type(v) == "table" and v.username) or k
-              local epoch = (type(v) == "table" and v.last_active_epoch) or 0
-              if uname and uname ~= "" then
-                user_map[uname] = epoch
-              end
-            end
-          end
-        end
-
-        user_map["Ibrahim Ansari"] = user_map["Ibrahim Ansari"] or os.time()
-
-        local user_list = {}
-        for u, _ in pairs(user_map) do
-          if trim(u):lower() ~= trim(current_username):lower() then
-            table.insert(user_list, u)
-          end
-        end
-
-        table.sort(user_list, function(a, b)
-          local ep_a = tonumber(user_map[a] or 0)
-          local ep_b = tonumber(user_map[b] or 0)
-          if ep_a ~= ep_b then return ep_a > ep_b end
-          return tostring(a):lower() < tostring(b):lower()
-        end)
-
-        for _, u in ipairs(user_list) do
-          local card = makeLayout(true, 10)
-          card.setBackgroundColor(0xFFEEEEEE)
-          card.setPadding(14, 12, 14, 12)
-          card.setFocusable(true)
-          card.setClickable(true)
-
-          local name_tv = makeText(getVerifiedName(u), 16)
-          name_tv.setTextColor(0xFF1E88E5)
-          card.addView(name_tv)
-
-          local sub_tv = makeText("Tap to open personal chat & voice call", 12)
-          sub_tv.setTextColor(0xFF666666)
-          card.addView(sub_tv)
-
-          users_container.addView(card, LinearLayout.LayoutParams(-1, -2))
-
-          card.setOnClickListener(function()
-            dialog.dismiss()
-            openPersonalChat(u)
-          end)
-        end
-      end)
-    end)
-  end)
-end
-
--- ========================================================
--- ABOUT CODE DIALOG
--- ========================================================
-
-local function formatCodeLikesSummary(likes_tbl)
-  if type(likes_tbl) ~= "table" or table_size(likes_tbl) == 0 then
-    return "0 Likes"
-  end
-  local names = {}
-  for lk, _ in pairs(likes_tbl) do
-    table.insert(names, Uri.decode(tostring(lk)))
-  end
-  local total = #names
-  if total == 1 then
-    return "Liked by " .. names[1]
-  elseif total == 2 then
-    return "Liked by " .. names[1] .. " along with 1 other person"
-  else
-    return "Liked by " .. names[1] .. " along with " .. tostring(total - 1) .. " other people"
-  end
-end
-
-function showAboutCodeDialog(item)
-  local layout = makeLayout(true, 15)
-  local main_scroll = ScrollView(activity)
-  local inner = makeLayout(true, 10)
-
-  local likes_summary = formatCodeLikesSummary(item.likes)
-  local seen_count = item.views and table_size(item.views) or 1
-
-  inner.addView(makeText(
-    "Title: " .. (item.title or "Untitled Code") .. "\n"
-    .. "Description: " .. (item.desc or "No description") .. "\n"
-    .. "Author: " .. getVerifiedName(item.author or "Anonymous") .. "\n"
-    .. "Date: " .. (item.timestamp or "N/A") .. "\n"
-    .. "Views: " .. tostring(seen_count) .. " • " .. likes_summary,
-    14
-  ))
-
-  inner.addView(makeText("Complete Lua Source Code:", 16))
-
-  local nav_scroll_row = makeLayout(false, 4)
-  local scroll_to_top_btn = makeButton("Scroll to Top")
-  local scroll_to_bottom_btn = makeButton("Scroll to Bottom")
-  nav_scroll_row.addView(scroll_to_top_btn, LinearLayout.LayoutParams(0, -2, 1))
-  nav_scroll_row.addView(scroll_to_bottom_btn, LinearLayout.LayoutParams(0, -2, 1))
-  inner.addView(nav_scroll_row)
-
-  local code_view = makeText(item.code or "", 13)
-  code_view.setTextIsSelectable(true)
-  code_view.setPadding(10, 10, 10, 10)
-  code_view.setBackgroundColor(0xFFF9F9F9)
-  inner.addView(code_view)
-
-  scroll_to_top_btn.setOnClickListener(function()
-    main_scroll.fullScroll(ScrollView.FOCUS_UP)
-  end)
-
-  scroll_to_bottom_btn.setOnClickListener(function()
-    main_scroll.fullScroll(ScrollView.FOCUS_DOWN)
-  end)
-
-  local copy_button = makeButton("Copy Code")
-  inner.addView(copy_button)
-
-  local like_button = makeButton("Like Code")
-  inner.addView(like_button)
-
-  inner.addView(makeText("Comments & Discussion", 16))
-
-  local comments_container = makeLayout(true, 8)
-  local comment_input = EditText(activity)
-  comment_input.setHint("Write a comment or reply...")
-
-  local function renderComments()
-    comments_container.removeAllViews()
-    local has_comments = false
-    if item.comments then
-      for _, c in pairs(item.comments) do
-        has_comments = true
-        local c_box = makeLayout(true, 6)
-        c_box.setBackgroundColor(0xFFF2F2F2)
-        c_box.addView(makeText(getVerifiedName(c.user or "Anonymous") .. ": " .. (c.text or ""), 13))
-        local reply_btn = makeButton("Reply")
-        c_box.addView(reply_btn, LinearLayout.LayoutParams(-2, -2))
-        comments_container.addView(c_box, LinearLayout.LayoutParams(-1, -2))
-
-        reply_btn.setOnClickListener(function()
-          comment_input.setText("@" .. (c.user or "Anonymous") .. " ")
-          comment_input.setSelection(comment_input.getText().length())
-        end)
+  local dlg = AlertDialog.Builder(activity)
+    .setTitle("BTP Assistant")
+    .setView(root)
+    .setNegativeButton("Close", DialogInterface.OnClickListener{
+      onClick = function()
+        isGenerating = false
+        isMicBusy = false
+        stopAstAudio()
+        pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
       end
-    end
-    if not has_comments then
-      comments_container.addView(makeText("No comments yet.", 13))
-    end
-  end
-
-  renderComments()
-  inner.addView(comments_container)
-  inner.addView(comment_input)
-
-  local submit_comment_btn = makeButton("Submit Comment")
-  inner.addView(submit_comment_btn)
-
-  main_scroll.addView(inner)
-  layout.addView(main_scroll, LinearLayout.LayoutParams(-1, 550))
-
-  local dialog = AlertDialog.Builder(activity)
-    .setTitle("Code Details")
-    .setView(layout)
-    .setPositiveButton("Close", nil)
+    })
     .create()
 
-  dialog.show()
-
-  copy_button.setOnClickListener(function() copyCode(item.code or "") end)
-
-  like_button.setOnClickListener(function()
-    if not item.id then return end
-    local key = encodeKey(current_username)
-    local url = FIREBASE_URL .. "codes/" .. item.id .. "/likes/" .. key .. ".json"
-    http_post_or_put(url, "PUT", true, function(ok)
-      if ok then
-        playSound(SOUND_LIKE, nil, ToneGenerator.TONE_PROP_ACK, false)
-        showToast("Liked!")
-        dialog.dismiss()
-        loadCodesData()
-      end
-    end)
-  end)
-
-  submit_comment_btn.setOnClickListener(function()
-    local text = trim(comment_input.getText())
-    if text == "" then showToast("Please write something.") return end
-    if not item.id then return end
-
-    local payload = {
-      user = current_username,
-      text = text,
-      timestamp = os.date("%Y-%m-%d %H:%M:%S")
-    }
-
-    http_post_or_put(FIREBASE_URL .. "codes/" .. item.id .. "/comments.json", "POST", payload, function(ok)
-      if ok then
-        playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP, false)
-        showToast("Comment submitted.")
-        dialog.dismiss()
-        loadCodesData()
-      end
-    end)
-  end)
-end
-
--- ========================================================
--- CODES FEED VIEW
--- ========================================================
-
-local feed_container
-
-local function renderFeedList(list_data)
-  if not feed_container then return end
-  feed_container.removeAllViews()
-
-  if #list_data == 0 then
-    local empty = makeText("No Lua codes uploaded yet.", 16)
-    empty.setPadding(20, 30, 20, 30)
-    feed_container.addView(empty)
-    return
-  end
-
-  for _, item in ipairs(list_data) do
-    local card = makeLayout(true, 14)
-    card.setBackgroundColor(0xFFFFFFFF)
-
-    card.addView(makeText(item.title or "Untitled Code", 18))
-    card.addView(makeText("Description: " .. (item.desc or "No description"), 13))
-    card.addView(makeText("Uploaded by: " .. getVerifiedName(item.author or "Anonymous"), 13))
-    card.addView(makeText("Date: " .. (item.timestamp or "N/A"), 12))
-    card.addView(makeText(formatCodeLikesSummary(item.likes), 12))
-
-    local preview = item.code or ""
-    if #preview > 250 then preview = preview:sub(1, 250) .. "\n\n...Preview shortened" end
-    local preview_view = makeText("Code Preview:\n" .. preview, 12)
-    preview_view.setTextIsSelectable(true)
-    card.addView(preview_view)
-
-    local btn_row = makeLayout(false, 4)
-    local copy_btn = makeButton("Copy Code")
-    local details_btn = makeButton("View / Comment")
-
-    btn_row.addView(copy_btn, LinearLayout.LayoutParams(0, -2, 1))
-    btn_row.addView(details_btn, LinearLayout.LayoutParams(0, -2, 1))
-    card.addView(btn_row)
-
-    copy_btn.setOnClickListener(function()
-      playSound(SOUND_CODE_HIT, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      copyCode(item.code or "")
-    end)
-
-    details_btn.setOnClickListener(function()
-      playSound(SOUND_CODE_HIT, nil, ToneGenerator.TONE_PROP_BEEP, false)
-      if item.id then
-        local view_url = FIREBASE_URL .. "codes/" .. item.id .. "/views/" .. encodeKey(current_username) .. ".json"
-        http_post_or_put(view_url, "PUT", true, function() end)
-      end
-      showAboutCodeDialog(item)
-    end)
-
-    feed_container.addView(card, LinearLayout.LayoutParams(-1, -2))
-  end
-end
-
-local function filterCodes(query)
-  local filtered = {}
-  query = trim(query):lower()
-  for _, item in ipairs(all_codes_data) do
-    local title = tostring(item.title or ""):lower()
-    local author = tostring(item.author or ""):lower()
-    local desc = tostring(item.desc or ""):lower()
-    if query == "" or title:find(query, 1, true) or author:find(query, 1, true) or desc:find(query, 1, true) then
-      table.insert(filtered, item)
-    end
-  end
-  renderFeedList(filtered)
-end
-
-function loadCodesData()
-  if not isNetworkAvailable() then return end
-  http_get(FIREBASE_URL .. 'codes.json?orderBy="$key"&limitToLast=60', function(success, response)
-    all_codes_data = {}
-    if success and response and response ~= "null" then
-      local ok, data = pcall(cjson.decode, response)
-      if ok and type(data) == "table" then
-        for k, v in pairs(data) do
-          if type(v) == "table" then
-            v.id = k
-            table.insert(all_codes_data, v)
-          end
-        end
-      end
-    end
-
-    table.sort(all_codes_data, function(a, b)
-      local ta = tostring(a.timestamp_raw or a.timestamp or "")
-      local tb = tostring(b.timestamp_raw or b.timestamp or "")
-      if ta ~= tb then return ta > tb end
-      return tostring(a.id or "") > tostring(b.id or "")
-    end)
-
-    renderFeedList(all_codes_data)
-  end)
-end
-
-function createHomeFeedView()
-  local layout = makeLayout(true, 10)
-  local search_input = EditText(activity)
-  search_input.setHint("Search Lua codes...")
-  layout.addView(search_input)
-
-  local scroll = ScrollView(activity)
-  feed_container = makeLayout(true, 10)
-  scroll.addView(feed_container)
-  layout.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1))
-
-  search_input.addTextChangedListener({
-    onTextChanged = function(s)
-      filterCodes(tostring(s))
+  dlg.setOnDismissListener(DialogInterface.OnDismissListener{
+    onDismiss = function()
+      isGenerating = false
+      isMicBusy = false
+      stopAstAudio()
+      pcall(function() if micRec then micRec.cancel() micRec.destroy() micRec = nil end end)
     end
   })
 
-  return layout
+  dlg.show()
 end
 
 -- ========================================================
--- UPLOAD CODE POPUP
+-- ASSISTANT MANAGEMENT DIALOG (ADMIN / VERIFIED)
 -- ========================================================
 
-function showUploadCodeDialog()
-  local layout = makeLayout(true, 15)
-
-  local title_input = EditText(activity)
-  title_input.setHint("Enter Code Title")
-  layout.addView(title_input)
-
-  local desc_input = EditText(activity)
-  desc_input.setHint("Enter Description")
-  layout.addView(desc_input)
-
-  local code_input = EditText(activity)
-  code_input.setHint("Paste full Lua source code here...")
-  code_input.setMinLines(7)
-  code_input.setGravity(Gravity.TOP)
-  layout.addView(code_input, LinearLayout.LayoutParams(-1, 0, 1))
-
-  local dialog = AlertDialog.Builder(activity)
-    .setTitle("Upload Open Source Code")
-    .setView(layout)
-    .setPositiveButton("Publish", nil)
-    .setNegativeButton("Cancel", nil)
-    .create()
-
-  dialog.show()
-
-  dialog.getButton(-1).setOnClickListener(View.OnClickListener{
-    onClick = function()
-      local title = trim(title_input.getText())
-      local desc = trim(desc_input.getText())
-      local content = trim(code_input.getText())
-
-      if title == "" or content == "" then
-        showToast("Please enter both title and code.")
-        return
-      end
-
-      playLimitedSound(SOUND_UPLOAD, 3000)
-
-      local payload = {
-        title = title,
-        desc = desc ~= "" and desc or "No description provided",
-        code = content,
-        author = current_username,
-        timestamp = os.date("%Y-%m-%d %H:%M:%S"),
-        timestamp_raw = os.date("%Y%m%d%H%M%S")
-      }
-
-      http_post_or_put(FIREBASE_URL .. "codes.json", "POST", payload, function(success)
-        if success then
-          playSound(SOUND_SUCCESS, nil, ToneGenerator.TONE_PROP_ACK, false)
-          showToast("Code uploaded successfully!")
-          dialog.dismiss()
-          loadCodesData()
-          if my_container then loadMyUploadsData() end
-        else
-          showToast("Upload failed. Check network.")
-        end
-      end)
-    end
-  })
-end
-
--- ========================================================
--- MY CODES VIEW
--- ========================================================
-
-local my_container
-
-function loadMyUploadsData()
-  if not my_container or not isNetworkAvailable() then return end
-  my_container.removeAllViews()
-  my_container.addView(makeText("Loading your uploaded codes...", 14))
-
-  http_get(FIREBASE_URL .. "codes.json", function(success, response)
-    my_container.removeAllViews()
-    local my_list = {}
-    local my_name_norm = trim(current_username):lower()
-
-    if success and response and response ~= "null" then
-      local ok, data = pcall(cjson.decode, response)
-      if ok and type(data) == "table" then
-        for k, v in pairs(data) do
-          if type(v) == "table" then
-            local auth_norm = trim(tostring(v.author or "")):lower()
-            if auth_norm == my_name_norm then
-              v.id = k
-              table.insert(my_list, v)
-            end
-          end
-        end
-      end
-    end
-
-    table.sort(my_list, function(a, b)
-      local ta = tostring(a.timestamp_raw or a.timestamp or "")
-      local tb = tostring(b.timestamp_raw or b.timestamp or "")
-      if ta ~= tb then return ta > tb end
-      return tostring(a.id or "") > tostring(b.id or "")
-    end)
-
-    if #my_list == 0 then
-      my_container.addView(makeText("You have not uploaded any codes yet.", 15))
-    else
-      for _, v in ipairs(my_list) do
-        local card = makeLayout(true, 10)
-        card.setBackgroundColor(0xFFFFFFFF)
-        card.addView(makeText(v.title or "Untitled", 16))
-        card.addView(makeText("Description: " .. (v.desc or ""), 12))
-        card.addView(makeText("Date: " .. (v.timestamp or "N/A"), 12))
-
-        local btn_row = makeLayout(false, 4)
-        local view_btn = makeButton("View Code")
-        local del_btn = makeButton("Delete Code")
-        btn_row.addView(view_btn, LinearLayout.LayoutParams(0, -2, 1))
-        btn_row.addView(del_btn, LinearLayout.LayoutParams(0, -2, 1))
-        card.addView(btn_row)
-
-        my_container.addView(card, LinearLayout.LayoutParams(-1, -2))
-
-        view_btn.setOnClickListener(function()
-          showAboutCodeDialog(v)
-        end)
-
-        del_btn.setOnClickListener(function()
-          http_delete(FIREBASE_URL .. "codes/" .. tostring(v.id) .. ".json", function(ok)
-            if ok then
-              showToast("Deleted successfully.")
-              loadMyUploadsData()
-              loadCodesData()
-            else
-              showToast("Failed to delete code.")
-            end
-          end)
-        end)
-      end
-    end
-  end)
-end
-
-function createMyUploadsView()
-  local layout = makeLayout(true, 12)
-  layout.addView(makeText("Your Published Codes", 16))
-
-  local scroll = ScrollView(activity)
-  my_container = makeLayout(true, 10)
-  scroll.addView(my_container)
-  layout.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1))
-
-  return layout
-end
-
--- ========================================================
--- GROUP MANAGEMENT DIALOG
--- ========================================================
-
-local function showGroupManagementDialog()
+local function showAssistantManagementDialog()
   if not isVerifiedUser(current_username) then
-    showToast("Only verified users can manage and ban groups.")
+    showToast("Only verified users can access Assistant Management.")
     return
   end
 
-  local layout = makeLayout(true, 12)
-  local scroll = ScrollView(activity)
-  local container = makeLayout(true, 8)
-  scroll.addView(container)
-  layout.addView(scroll, LinearLayout.LayoutParams(-1, 520))
+  local layout = makeLayout(true, 14)
+  local lockBtn = makeButton(assistant_is_locked and "Unlock BTP Assistant (Currently Locked)" or "Lock BTP Assistant (Hide Input for Users)")
+  local trainBtn = makeButton("Train Global Assistant (Add / View Q&A Knowledge)")
+  local fbBtn = makeButton("View User Feedbacks from Assistant")
 
-  container.addView(makeText("Loading all registered groups...", 14))
+  layout.addView(lockBtn)
+  layout.addView(trainBtn)
+  layout.addView(fbBtn)
 
-  local dialog = AlertDialog.Builder(activity)
-    .setTitle("Group Management (Verified)")
-    .setView(layout)
-    .setPositiveButton("Close", nil)
-    .create()
-  dialog.show()
-
-  local function loadManageableGroups()
-    http_get(FIREBASE_URL .. "btp_groups.json", function(s, r)
-      container.removeAllViews()
-      if not s or not r or r == "null" then
-        container.addView(makeText("No groups found.", 14))
-        return
-      end
-      local ok, data = pcall(cjson.decode, r)
-      if not ok or type(data) ~= "table" then
-        container.addView(makeText("No groups found.", 14))
-        return
-      end
-
-      local list = {}
-      for gid, g in pairs(data) do
-        if type(g) == "table" then
-          g.id = gid
-          table.insert(list, g)
-        end
-      end
-
-      table.sort(list, function(a, b)
-        return tostring(a.name or ""):lower() < tostring(b.name or ""):lower()
-      end)
-
-      if #list == 0 then
-        container.addView(makeText("No groups found.", 14))
-        return
-      end
-
-      for _, g in ipairs(list) do
-        local is_b = (g.is_banned == true or g.is_banned == "true")
-        local card = makeLayout(true, 10)
-        card.setBackgroundColor(is_b and 0xFFFFCDD2 or 0xFFEEEEEE)
-        card.addView(makeText(tostring(g.name or "Unnamed") .. (is_b and " [BANNED]" or " [ACTIVE]"), 15))
-        card.addView(makeText("Creator: " .. getVerifiedName(g.creator or "") .. " • Members: " .. tostring(g.members and table_size(g.members) or 1), 12))
-
-        local act_row = makeLayout(false, 4)
-        local toggle_ban_btn = makeButton(is_b and "Unban Group" or "Ban Group")
-        local delete_grp_btn = makeButton("Delete Group")
-        delete_grp_btn.setBackgroundColor(0xFFD32F2F)
-        delete_grp_btn.setTextColor(0xFFFFFFFF)
-        act_row.addView(toggle_ban_btn, LinearLayout.LayoutParams(0, -2, 1))
-        act_row.addView(delete_grp_btn, LinearLayout.LayoutParams(0, -2, 1))
-        card.addView(act_row, LinearLayout.LayoutParams(-1, -2))
-        container.addView(card, LinearLayout.LayoutParams(-1, -2))
-
-        toggle_ban_btn.setOnClickListener(function()
-          local next_b = not is_b
-          http_post_or_put(FIREBASE_URL .. "btp_groups/" .. g.id .. "/is_banned.json", "PUT", next_b, function(ok)
-            if ok then
-              showToast(next_b and ("Banned group: " .. tostring(g.name or "")) or ("Unbanned group: " .. tostring(g.name or "")))
-              loadManageableGroups()
-            end
-          end)
-        end)
-
-        delete_grp_btn.setOnClickListener(function()
-          http_delete(FIREBASE_URL .. "btp_groups/" .. g.id .. ".json", function()
-            http_delete(FIREBASE_URL .. "btp_group_messages/" .. g.id .. ".json", function() end)
-            showToast("Deleted group: " .. tostring(g.name or ""))
-            loadManageableGroups()
-          end)
-        end)
+  lockBtn.setOnClickListener(function()
+    local nextLock = not assistant_is_locked
+    http_post_or_put(FIREBASE_URL .. "settings/assistant_locked.json", "PUT", nextLock, function(ok)
+      if ok then
+        assistant_is_locked = nextLock
+        lockBtn.setText(assistant_is_locked and "Unlock BTP Assistant (Currently Locked)" or "Lock BTP Assistant (Hide Input for Users)")
+        showToast(assistant_is_locked and "Assistant locked." or "Assistant unlocked.")
       end
     end)
-  end
+  end)
 
-  loadManageableGroups()
-end
+  trainBtn.setOnClickListener(function()
+    local tBox = makeLayout(true, 12)
+    local qInp = EditText(activity)
+    qInp.setHint("Question / Topic / Keyword")
+    local aInp = EditText(activity)
+    aInp.setHint("Trained Answer / Information")
+    aInp.setMinLines(3)
+    tBox.addView(qInp)
+    tBox.addView(aInp)
 
--- ========================================================
--- ADMIN PANEL DIALOG
--- ========================================================
-
-function showAdminPanelDialog()
-  local full_access = isVerifiedUser(current_username)
-  local layout = makeLayout(true, 15)
-
-  local broadcast_btn = makeButton("Send Notification Broadcast")
-  layout.addView(broadcast_btn)
-
-  broadcast_btn.setOnClickListener(function()
-    local input = EditText(activity)
-    input.setHint("Write announcement message...")
+    local existingStr = ""
+    for i, it in ipairs(assistant_trained_items) do
+      existingStr = existingStr .. tostring(i) .. ". Q: " .. tostring(it.q or "") .. "\n    A: " .. tostring(it.a or "") .. "\n\n"
+    end
+    local listTv = makeText(existingStr ~= "" and existingStr or "No trained items yet.", 12)
+    local sc = ScrollView(activity)
+    sc.addView(listTv)
+    tBox.addView(sc, LinearLayout.LayoutParams(-1, 220))
 
     AlertDialog.Builder(activity)
-      .setTitle("Broadcast to Notifications")
-      .setView(input)
-      .setPositiveButton("Send", DialogInterface.OnClickListener{
+      .setTitle("Train Global BTP Assistant")
+      .setView(tBox)
+      .setPositiveButton("Save Training", DialogInterface.OnClickListener{
         onClick = function()
-          local msg = trim(input.getText())
-          if msg ~= "" then
-            http_post_or_put(FIREBASE_URL .. "settings/broadcast.json", "PUT", msg, function(ok)
-              if ok then
-                playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
-                showToast("Broadcast sent!")
-              end
-            end)
+          local qT = trim(qInp.getText())
+          local aT = trim(aInp.getText())
+          if qT == "" or aT == "" then
+            showToast("Please enter both question and answer.")
+            return
           end
-        end
-      })
-      .setNegativeButton("Clear Broadcast", DialogInterface.OnClickListener{
-        onClick = function()
-          http_delete(FIREBASE_URL .. "settings/broadcast.json", function()
-            showToast("Broadcast cleared.")
+          table.insert(assistant_trained_items, { q = qT, a = aT, added_by = current_username })
+          http_post_or_put(FIREBASE_URL .. "settings/assistant_training.json", "PUT", assistant_trained_items, function(ok)
+            if ok then showToast("Assistant trained with new knowledge!") end
           end)
         end
       })
+      .setNegativeButton("Close", nil)
       .show()
   end)
 
-  if full_access then
-    local assistant_mgmt_btn = makeButton("Assistant Management (Lock, Train & Feedback)")
-    local group_mgmt_btn = makeButton("Group Management (Ban / Unban / Delete)")
-    local lock_room_btn = makeButton(public_room_locked and "Unlock BTP Voice Room (Currently Locked)" or "Lock BTP Voice Room (Only Admin/Dev)")
-    local server_toggle_btn = makeButton(server_is_down and "Turn Server ON (Currently Server OFF)" or "Turn Server OFF (Maintenance Mode)")
-    local popup_note_btn = makeButton("Update Popup Announcement Note")
-    local users_mgmt_btn = makeButton("Manage Users (Role, Admin, Verified & Block)")
-    local blocked_users_btn = makeButton("View Blocked Users & Unblock Requests")
-
-    layout.addView(assistant_mgmt_btn)
-    layout.addView(group_mgmt_btn)
-    layout.addView(lock_room_btn)
-    layout.addView(server_toggle_btn)
-    layout.addView(popup_note_btn)
-    layout.addView(users_mgmt_btn)
-    layout.addView(blocked_users_btn)
-
-    assistant_mgmt_btn.setOnClickListener(function()
-      showAssistantManagementDialog()
-    end)
-
-    group_mgmt_btn.setOnClickListener(function()
-      showGroupManagementDialog()
-    end)
-
-    lock_room_btn.setOnClickListener(function()
-      local next_lock = not public_room_locked
-      http_post_or_put(FIREBASE_URL .. "settings/public_room_locked.json", "PUT", next_lock, function(ok)
-        if ok then
-          public_room_locked = next_lock
-          lock_room_btn.setText(public_room_locked and "Unlock BTP Voice Room (Currently Locked)" or "Lock BTP Voice Room (Only Admin/Dev)")
-          showToast(public_room_locked and "BTP Voice Room locked." or "BTP Voice Room unlocked.")
-        end
-      end)
-    end)
-
-    server_toggle_btn.setOnClickListener(function()
-      local next_down = not server_is_down
-      http_post_or_put(FIREBASE_URL .. "settings/server_down.json", "PUT", next_down, function(ok)
-        if ok then
-          server_is_down = next_down
-          server_toggle_btn.setText(server_is_down and "Turn Server ON (Currently Server OFF)" or "Turn Server OFF (Maintenance Mode)")
-          showToast(server_is_down and "Server is now OFF for users." or "Server is now ON.")
-        end
-      end)
-    end)
-
-    popup_note_btn.setOnClickListener(function()
-      local note_layout = makeLayout(true, 15)
-      local note_input = EditText(activity)
-      note_input.setHint("Write popup announcement note for all users...")
-      note_input.setMinLines(4)
-      note_input.setGravity(Gravity.TOP)
-      note_layout.addView(note_input)
-
-      http_get(FIREBASE_URL .. "settings/popup_announcement.json", function(s, r)
-        if s and r and r ~= "null" then
-          local ok, data = pcall(cjson.decode, r)
-          if ok and type(data) == "table" and data.message then
-            note_input.setText(tostring(data.message))
-          elseif ok and type(data) == "string" then
-            note_input.setText(data)
-          end
-        end
-      end)
-
-      AlertDialog.Builder(activity)
-        .setTitle("Popup Announcement Note")
-        .setView(note_layout)
-        .setPositiveButton("Publish Note", DialogInterface.OnClickListener{
-          onClick = function()
-            local msg = trim(note_input.getText())
-            if msg ~= "" then
-              local payload = {
-                note_id = "note_" .. tostring(os.time()),
-                message = msg,
-                timestamp = os.date("%I:%M %p, %d %b %Y")
-              }
-              http_post_or_put(FIREBASE_URL .. "settings/popup_announcement.json", "PUT", payload, function(ok)
-                if ok then
-                  playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
-                  showToast("Popup announcement note published!")
-                end
-              end)
-            else
-              showToast("Please write a note first.")
+  fbBtn.setOnClickListener(function()
+    http_get(FIREBASE_URL .. "settings/assistant_feedbacks.json", function(s, r)
+      local lines = {}
+      if s and r and r ~= "null" then
+        local ok, data = pcall(cjson.decode, r)
+        if ok and type(data) == "table" then
+          for _, item in pairs(data) do
+            if type(item) == "table" then
+              table.insert(lines, tostring(item.user or "User") .. " (" .. tostring(item.timestamp or "") .. "):\n" .. tostring(item.message or ""))
             end
           end
-        })
-        .setNegativeButton("Clear Note", DialogInterface.OnClickListener{
-          onClick = function()
-            http_delete(FIREBASE_URL .. "settings/popup_announcement.json", function()
-              showToast("Popup announcement note cleared.")
-            end)
-          end
-        })
-        .show()
+        end
+      end
+      showMessage("Assistant User Feedbacks", #lines > 0 and table.concat(lines, "\n\n") or "No feedback received yet.")
     end)
-
-    users_mgmt_btn.setOnClickListener(function()
-      local u_layout = makeLayout(true, 10)
-      local u_scroll = ScrollView(activity)
-      local u_container = makeLayout(true, 8)
-      u_scroll.addView(u_container)
-      u_layout.addView(u_scroll, LinearLayout.LayoutParams(-1, 520))
-
-      u_container.addView(makeText("Loading users in alphabetical order...", 14))
-
-      local u_dialog = AlertDialog.Builder(activity)
-        .setTitle("Registered Users (A-Z)")
-        .setView(u_layout)
-        .setPositiveButton("Close", nil)
-        .create()
-
-      u_dialog.show()
-
-      http_get(FIREBASE_URL .. "registered_users.json", function(s, r)
-        loadVerifiedUsers(function()
-          loadAdminUsers(function()
-            loadBlockedUsers(function()
-              u_container.removeAllViews()
-              local all_names = {}
-
-              if s and r and r ~= "null" then
-                local ok, data = pcall(cjson.decode, r)
-                if ok and type(data) == "table" then
-                  for uname, uinfo in pairs(data) do
-                    local actual_name = (type(uinfo) == "table" and uinfo.username) or uname
-                    if actual_name and actual_name ~= "" then
-                      table.insert(all_names, actual_name)
-                    end
-                  end
-                end
-              end
-
-              local has_ibrahim = false
-              for _, n in ipairs(all_names) do
-                if n:lower() == "ibrahim ansari" then has_ibrahim = true break end
-              end
-              if not has_ibrahim then table.insert(all_names, "Ibrahim Ansari") end
-
-              table.sort(all_names, function(a, b)
-                return tostring(a):lower() < tostring(b):lower()
-              end)
-
-              if #all_names == 0 then
-                u_container.addView(makeText("No registered users found.", 14))
-              else
-                local current_alphabet = ""
-                for _, actual_name in ipairs(all_names) do
-                  local first_char = tostring(actual_name:sub(1, 1)):upper()
-                  if first_char ~= current_alphabet then
-                    current_alphabet = first_char
-                    local section_header = makeText("── Section " .. current_alphabet .. " ──", 14)
-                    section_header.setTextColor(0xFF1E88E5)
-                    section_header.setPadding(0, 10, 0, 4)
-                    u_container.addView(section_header)
-                  end
-
-                  local is_ver = isVerifiedUser(actual_name)
-                  local is_adm = isAdminUser(actual_name)
-                  local is_blocked = (blocked_users_map[actual_name] == true or blocked_users_map[actual_name] == "true")
-
-                  local row = makeLayout(true, 8)
-                  row.setBackgroundColor(is_blocked and 0xFFFFCDD2 or 0xFFEEEEEE)
-                  row.addView(makeText("User: " .. getRoleBadgeText(actual_name), 15))
-
-                  local role_label = is_ver and "Verified" or (is_adm and "Admin" or "Normal")
-                  local status_str = "Role: " .. role_label .. " • " .. (is_blocked and "BLOCKED" or "Active")
-                  row.addView(makeText(status_str, 12))
-
-                  local action_row = makeLayout(false, 4)
-                  local toggle_admin_btn = makeButton(is_adm and "Remove Admin" or "Make Admin")
-                  local toggle_verify_btn = makeButton(is_ver and "Remove Verified" or "Make Verified")
-                  local toggle_block_btn = makeButton(is_blocked and "Unblock" or "Block User")
-
-                  action_row.addView(toggle_admin_btn, LinearLayout.LayoutParams(0, -2, 1))
-                  action_row.addView(toggle_verify_btn, LinearLayout.LayoutParams(0, -2, 1))
-                  action_row.addView(toggle_block_btn, LinearLayout.LayoutParams(0, -2, 1))
-                  row.addView(action_row)
-
-                  u_container.addView(row, LinearLayout.LayoutParams(-1, -2))
-
-                  toggle_admin_btn.setOnClickListener(function()
-                    if is_adm then
-                      http_delete(FIREBASE_URL .. "admin_users/" .. encodeKey(actual_name) .. ".json", function()
-                        showToast(actual_name .. " removed from Admin.")
-                        u_dialog.dismiss()
-                        loadAdminUsers()
-                      end)
-                    else
-                      http_post_or_put(FIREBASE_URL .. "admin_users/" .. encodeKey(actual_name) .. ".json", "PUT", true, function()
-                        showToast(actual_name .. " is now Admin!")
-                        u_dialog.dismiss()
-                        loadAdminUsers()
-                      end)
-                    end
-                  end)
-
-                  toggle_verify_btn.setOnClickListener(function()
-                    if is_ver then
-                      if isDeveloper(actual_name) then
-                        showToast("Developer cannot be unverified.")
-                        return
-                      end
-                      http_delete(FIREBASE_URL .. "verified_users/" .. encodeKey(actual_name) .. ".json", function()
-                        showToast(actual_name .. " is now unverified.")
-                        u_dialog.dismiss()
-                        loadVerifiedUsers()
-                      end)
-                    else
-                      http_post_or_put(FIREBASE_URL .. "verified_users/" .. encodeKey(actual_name) .. ".json", "PUT", true, function()
-                        showToast(actual_name .. " is now Verified!")
-                        u_dialog.dismiss()
-                        loadVerifiedUsers()
-                      end)
-                    end
-                  end)
-
-                  toggle_block_btn.setOnClickListener(function()
-                    if is_blocked then
-                      http_delete(FIREBASE_URL .. "blocked/" .. encodeKey(actual_name) .. ".json", function()
-                        http_delete(FIREBASE_URL .. "unblock_requests/" .. encodeKey(actual_name) .. ".json", function() end)
-                        showToast(actual_name .. " unblocked.")
-                        u_dialog.dismiss()
-                        loadBlockedUsers()
-                      end)
-                    else
-                      if isDeveloper(actual_name) then
-                        showToast("Developer cannot be blocked!")
-                        return
-                      end
-                      http_post_or_put(FIREBASE_URL .. "blocked/" .. encodeKey(actual_name) .. ".json", "PUT", true, function()
-                        showToast(actual_name .. " has been blocked.")
-                        u_dialog.dismiss()
-                        loadBlockedUsers()
-                      end)
-                    end
-                  end)
-                end
-              end
-            end)
-          end)
-        end)
-      end)
-    end)
-
-    blocked_users_btn.setOnClickListener(function()
-      local b_layout = makeLayout(true, 10)
-      local b_scroll = ScrollView(activity)
-      local b_container = makeLayout(true, 8)
-      b_scroll.addView(b_container)
-      b_layout.addView(b_scroll, LinearLayout.LayoutParams(-1, 500))
-
-      b_container.addView(makeText("Loading blocked users & unblock requests...", 14))
-
-      local b_dialog = AlertDialog.Builder(activity)
-        .setTitle("Blocked Users & Requests")
-        .setView(b_layout)
-        .setPositiveButton("Close", nil)
-        .create()
-
-      b_dialog.show()
-
-      http_get(FIREBASE_URL .. "blocked.json", function(s, r)
-        http_get(FIREBASE_URL .. "unblock_requests.json", function(s_req, r_req)
-          b_container.removeAllViews()
-          local requests_map = {}
-          if s_req and r_req and r_req ~= "null" then
-            local ok, req_data = pcall(cjson.decode, r_req)
-            if ok and type(req_data) == "table" then requests_map = req_data end
-          end
-
-          local count_blocked = 0
-          if s and r and r ~= "null" then
-            local ok, data = pcall(cjson.decode, r)
-            if ok and type(data) == "table" then
-              for buname, is_blk in pairs(data) do
-                if is_blk == true or is_blk == "true" then
-                  count_blocked = count_blocked + 1
-                  local card = makeLayout(true, 8)
-                  card.setBackgroundColor(0xFFEEEEEE)
-                  card.addView(makeText("Blocked User: " .. buname, 15))
-
-                  if requests_map[buname] then
-                    local r_info = requests_map[buname]
-                    local req_msg = type(r_info) == "table" and r_info.message or "Requesting unblock"
-                    card.addView(makeText("Unblock Request: " .. req_msg, 12))
-                  end
-
-                  local unblock_btn = makeButton("Unblock " .. buname)
-                  card.addView(unblock_btn)
-                  b_container.addView(card, LinearLayout.LayoutParams(-1, -2))
-
-                  unblock_btn.setOnClickListener(function()
-                    http_delete(FIREBASE_URL .. "blocked/" .. encodeKey(buname) .. ".json", function()
-                      http_delete(FIREBASE_URL .. "unblock_requests/" .. encodeKey(buname) .. ".json", function() end)
-                      showToast(buname .. " has been unblocked.")
-                      b_dialog.dismiss()
-                      loadBlockedUsers()
-                    end)
-                  end)
-                end
-              end
-            end
-          end
-
-          if count_blocked == 0 then
-            b_container.addView(makeText("No blocked users.", 14))
-          end
-        end)
-      end)
-    end)
-  end
+  end)
 
   AlertDialog.Builder(activity)
-    .setTitle(full_access and "Admin Panel (Verified / Developer)" or "Admin Panel (Notification Only)")
+    .setTitle("Assistant Management")
     .setView(layout)
     .setPositiveButton("Close", nil)
     .show()
 end
 
 -- ========================================================
--- NOTIFICATION & PRIVACY SETTINGS POPUP
+-- DATA-SAVING CLEANUP & ANNOUNCEMENT / YOUTUBE LINK CHECKER
 -- ========================================================
 
-function showNotificationPrivacyDialog()
-  local layout = makeLayout(true, 18)
+local function runSilentAutoCleanup()
+  if not isNetworkAvailable() or not isAppForeground then return end
+  local now = os.time()
+  local last_cleanup = tonumber(sp.getString("last_cleanup_epoch", "0")) or 0
+  if (now - last_cleanup) < 86400 then
+    return
+  end
+  sp.edit().putString("last_cleanup_epoch", tostring(now)).apply()
 
-  local notif_sound_status = sp.getBoolean("notif_sound_enabled", false)
-  local share_presence_status = sp.getBoolean("share_presence_enabled", true)
+  pcall(function()
+    local seven_days_sec = 7 * 86400
+    local three_days_sec = 3 * 86400
 
-  local notif_toggle_btn = makeButton("Notifications Sound (In-App): " .. (notif_sound_status and "ENABLED ON" or "DISABLED OFF"))
-  local presence_toggle_btn = makeButton("Show Online / Last Seen: " .. (share_presence_status and "VISIBLE ON" or "HIDDEN OFF"))
+    http_get(FIREBASE_URL .. "btp_groups.json", function(s, r)
+      if s and r and r ~= "null" then
+        local ok, groups = pcall(cjson.decode, r)
+        if ok and type(groups) == "table" then
+          for gid, g in pairs(groups) do
+            if type(g) == "table" and not g.is_banned then
+              local last_act = tonumber(g.last_activity_epoch or g.created_epoch or 0)
+              local mem_count = g.members and table_size(g.members) or 1
+              if last_act > 0 and (now - last_act) >= three_days_sec and mem_count < 5 then
+                http_delete(FIREBASE_URL .. "btp_groups/" .. gid .. ".json", function() end)
+                http_delete(FIREBASE_URL .. "btp_group_messages/" .. gid .. ".json", function() end)
+              end
+            end
+          end
+        end
+      end
+    end)
 
-  layout.addView(makeText("Configure sound alerts and online visibility:", 13))
-  layout.addView(notif_toggle_btn)
-  layout.addView(presence_toggle_btn)
+    http_get(FIREBASE_URL .. "unblock_requests.json", function(s, r)
+      if s and r and r ~= "null" then
+        local ok, data = pcall(cjson.decode, r)
+        if ok and type(data) == "table" then
+          for u, req in pairs(data) do
+            if type(req) == "table" and req.timestamp_epoch and (now - tonumber(req.timestamp_epoch)) > seven_days_sec then
+              http_delete(FIREBASE_URL .. "unblock_requests/" .. u .. ".json", function() end)
+            end
+          end
+        end
+      end
+    end)
+  end)
+end
+
+local function checkYoutubeBroadcastDialog()
+  if not isNetworkAvailable() then return end
+  http_get(FIREBASE_URL .. "settings/youtube_broadcast.json", function(s, r)
+    if s and r and r ~= "null" then
+      local ok, data = pcall(cjson.decode, r)
+      if ok and type(data) == "table" then
+        local yt_id = tostring(data.yt_id or "")
+        local yt_title = trim(tostring(data.title or ""))
+        local yt_url = trim(tostring(data.url or ""))
+        if yt_id ~= "" and yt_url ~= "" then
+          local seen_yt = tostring(sp.getString("last_seen_yt_broadcast_id", ""))
+          if seen_yt == yt_id then return end
+
+          playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
+          local box = makeLayout(true, 16)
+          box.addView(makeText(yt_title ~= "" and yt_title or "New Video Shared by Admin", 16))
+          box.addView(makeText("Tap 'Play on YouTube' to watch directly on YouTube.", 13))
+
+          AlertDialog.Builder(activity)
+            .setTitle("YouTube Video Broadcast")
+            .setView(box)
+            .setCancelable(false)
+            .setPositiveButton("Play on YouTube", DialogInterface.OnClickListener{
+              onClick = function()
+                sp.edit().putString("last_seen_yt_broadcast_id", yt_id).apply()
+                pcall(function()
+                  local intent = Intent(Intent.ACTION_VIEW, Uri.parse(yt_url))
+                  activity.startActivity(intent)
+                end)
+              end
+            })
+            .setNegativeButton("Close", DialogInterface.OnClickListener{
+              onClick = function()
+                sp.edit().putString("last_seen_yt_broadcast_id", yt_id).apply()
+              end
+            })
+            .show()
+        end
+      end
+    end
+  end)
+end
+
+local function checkPopupAnnouncementNote()
+  if not isNetworkAvailable() then
+    return
+  end
+  http_get(FIREBASE_URL .. "settings/popup_announcement.json", function(s, r)
+    if s and r and r ~= "null" then
+      local ok, data = pcall(cjson.decode, r)
+      local note_text = ""
+      local note_time = ""
+      local note_id = ""
+      if ok and type(data) == "table" then
+        note_text = trim(tostring(data.message or ""))
+        note_time = tostring(data.timestamp or "")
+        note_id = tostring(data.note_id or note_time or note_text)
+      elseif ok and type(data) == "string" then
+        note_text = trim(data)
+        note_id = note_text
+      end
+
+      if note_text ~= "" then
+        local last_seen_note_id = tostring(sp.getString("last_seen_announcement_id", ""))
+        if last_seen_note_id == note_id then
+          checkYoutubeBroadcastDialog()
+          return
+        end
+
+        playSound(SOUND_ALERT_ANNOUNCE, nil, ToneGenerator.TONE_PROP_BEEP2, false)
+        local display_msg = note_text
+        if note_time ~= "" then
+          display_msg = display_msg .. "\n\nPosted: " .. note_time
+        end
+        AlertDialog.Builder(activity)
+          .setTitle("Announcement Note")
+          .setMessage(display_msg)
+          .setCancelable(false)
+          .setPositiveButton("OK", DialogInterface.OnClickListener{
+            onClick = function()
+              sp.edit().putString("last_seen_announcement_id", note_id).apply()
+              checkYoutubeBroadcastDialog()
+            end
+          })
+          .show()
+      else
+        checkYoutubeBroadcastDialog()
+      end
+    else
+      checkYoutubeBroadcastDialog()
+    end
+  end)
+end
+
+-- ========================================================
+-- CHECK GLOBAL ADMIN BLOCK STATUS
+-- ========================================================
+
+local function checkBlockStatus(onNotBlocked)
+  if current_username == "" or isDeveloper(current_username) or not isNetworkAvailable() then
+    if onNotBlocked then onNotBlocked() end
+    return
+  end
+
+  http_get(FIREBASE_URL .. "blocked/" .. encodeKey(current_username) .. ".json", function(success, response)
+    if success and response and (response == "true" or response == '"true"') then
+      local layout = makeLayout(true, 20)
+      layout.addView(makeText("Access Denied!\nYou have been blocked by the admin due to policy violations.", 15))
+      
+      local req_btn = makeButton("Send Unblock Request")
+      layout.addView(req_btn)
+
+      local dialog = AlertDialog.Builder(activity)
+        .setTitle("Notice: You Are Blocked")
+        .setView(layout)
+        .setCancelable(false)
+        .setPositiveButton("Exit Application", DialogInterface.OnClickListener{
+          onClick = function()
+            activity.finish()
+          end
+        })
+        .create()
+
+      dialog.show()
+
+      req_btn.setOnClickListener(function()
+        local unblock_req = {
+          user = current_username,
+          message = "Please unblock my account.",
+          timestamp = os.date("%I:%M %p, %d %b"),
+          timestamp_epoch = os.time()
+        }
+        http_post_or_put(FIREBASE_URL .. "unblock_requests/" .. encodeKey(current_username) .. ".json", "PUT", unblock_req, function(ok)
+          showToast("Unblock request submitted successfully to admin.")
+        end)
+      end)
+    else
+      if onNotBlocked then onNotBlocked() end
+    end
+  end)
+end
+
+-- ========================================================
+-- WELCOME / LOGIN
+-- ========================================================
+
+function showWelcomeDialog()
+  local layout = makeLayout(true, 30)
+
+  local message = makeText(
+    "WELCOME TO\n" .. APP_TITLE .. "!\n\n"
+    .. APP_DEV .. "\n\n"
+    .. "Disclaimer & Terms:\n"
+    .. "All source codes shared on this platform are public.\n\n"
+    .. "Share open-source Lua code responsibly.\n"
+    .. "Created & Copyright by Ibrahim Ansari",
+    14
+  )
+  layout.addView(message)
+
+  local input = EditText(activity)
+  input.setHint("Enter Your Name (Required)")
+  layout.addView(input)
 
   local dialog = AlertDialog.Builder(activity)
-    .setTitle("Notification & Privacy Settings")
+    .setTitle("Welcome")
+    .setView(layout)
+    .setCancelable(false)
+    .setPositiveButton("Login / Continue", nil)
+    .create()
+
+  dialog.show()
+
+  dialog.getButton(-1).setOnClickListener(View.OnClickListener{
+    onClick = function()
+      local name = trim(input.getText())
+      if name == "" then
+        showToast("Please enter your name to proceed!")
+        return
+      end
+
+      sp.edit().putString("username", name).apply()
+      current_username = name
+      registerUserToFirebase(name)
+      startPresenceTracking()
+      startIncomingCallWatcher()
+      dialog.dismiss()
+      initMainWindow()
+      checkPopupAnnouncementNote()
+      Handler(Looper.getMainLooper()).postDelayed(Runnable({
+        run = function()
+          checkUpdate(false)
+        end
+      }), 2000)
+    end
+  })
+end
+
+local function copyCode(code)
+  local clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE)
+  clipboard.setText(tostring(code or ""))
+  showToast("Code copied to clipboard!")
+end
+
+-- ========================================================
+-- NOTIFICATIONS & LIKE SOUND WATCHER
+-- ========================================================
+
+function stopBackgroundNotificationWatcher()
+  if bg_notif_handler ~= nil and bg_notif_runnable ~= nil then
+    pcall(function()
+      bg_notif_handler.removeCallbacks(bg_notif_runnable)
+    end)
+    bg_notif_handler = nil
+    bg_notif_runnable = nil
+  end
+end
+
+function updateNotificationCount(silent)
+  if not notif_button or not isNetworkAvailable() or not isAppForeground then return end
+  
+  local seen_map = getSeenNotifsMap()
+
+  http_get(FIREBASE_URL .. "codes.json", function(success, response)
+    if not success or not response or response == "null" or not isAppForeground then return end
+
+    local unseen_notif_count = 0
+    local new_code_discovered = false
+    local new_like_discovered = false
+    local new_comment_discovered = false
+
+    local ok, data = pcall(cjson.decode, response)
+    if ok and type(data) == "table" then
+      for k, v in pairs(data) do
+        if type(v) == "table" then
+          if is_first_bg_sync_done and not known_code_ids[k] then
+            new_code_discovered = true
+          end
+          known_code_ids[k] = true
+
+          if trim(tostring(v.author or "")):lower() == trim(current_username):lower() then
+            if v.likes then
+              for liker, _ in pairs(v.likes) do
+                local dec_liker = Uri.decode(tostring(liker))
+                if trim(dec_liker):lower() ~= trim(current_username):lower() then
+                  local l_key = "like_" .. k .. "_" .. dec_liker
+                  if not seen_map[l_key] then
+                    unseen_notif_count = unseen_notif_count + 1
+                  end
+                  if is_first_bg_sync_done and not known_notif_keys[l_key] then
+                    new_like_discovered = true
+                  end
+                  known_notif_keys[l_key] = true
+                end
+              end
+            end
+            if v.comments then
+              for cid, c in pairs(v.comments) do
+                if c.user and trim(tostring(c.user)):lower() ~= trim(current_username):lower() then
+                  local c_key = "com_" .. k .. "_" .. tostring(cid)
+                  if not seen_map[c_key] then
+                    unseen_notif_count = unseen_notif_count + 1
+                  end
+                  if is_first_bg_sync_done and not known_notif_keys[c_key] then
+                    new_comment_discovered = true
+                  end
+                  known_notif_keys[c_key] = true
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    http_get(FIREBASE_URL .. "settings/broadcast.json", function(s_b, r_b)
+      if not isAppForeground then return end
+      if s_b and r_b and r_b ~= "null" then
+        local b_text = tostring(r_b)
+        local ok_b, dec_b = pcall(cjson.decode, r_b)
+        if ok_b and type(dec_b) == "string" then b_text = dec_b end
+        local b_key = "broadcast_" .. b_text
+        if not seen_map[b_key] then
+          unseen_notif_count = unseen_notif_count + 1
+        end
+        if is_first_bg_sync_done and not known_notif_keys[b_key] then
+          new_comment_discovered = true
+        end
+        known_notif_keys[b_key] = true
+      end
+
+      local count_str = unseen_notif_count > 99 and "99+" or tostring(unseen_notif_count)
+      notif_button.setText("Notifications (" .. count_str .. ")")
+
+      if chat_tab_btn then
+        chat_tab_btn.setText("Chat")
+      end
+
+      if is_first_bg_sync_done and new_like_discovered then
+        playSound(SOUND_LIKE, nil, ToneGenerator.TONE_PROP_ACK, false)
+      end
+
+      local sound_allowed = sp.getBoolean("notif_sound_enabled", false)
+      if not silent and sound_allowed and is_first_bg_sync_done then
+        if new_code_discovered or new_comment_discovered then
+          playNotificationSoundDebounced()
+        end
+      end
+
+      is_first_bg_sync_done = true
+    end)
+  end)
+end
+
+local function startBackgroundNotificationWatcher()
+  if not sp.getBoolean("notif_sound_enabled", false) or not isAppForeground then return end
+  if bg_notif_handler == nil then
+    bg_notif_handler = Handler(Looper.getMainLooper())
+    bg_notif_runnable = Runnable({
+      run = function()
+        if isAppForeground and isNetworkAvailable() and sp.getBoolean("notif_sound_enabled", false) then
+          updateNotificationCount(false)
+          if bg_notif_handler and bg_notif_runnable then
+            bg_notif_handler.postDelayed(bg_notif_runnable, 60000)
+          end
+        else
+          stopBackgroundNotificationWatcher()
+        end
+      end
+    })
+    bg_notif_handler.postDelayed(bg_notif_runnable, 60000)
+  end
+end
+
+function showNotificationsDialog()
+  local layout = makeLayout(true, 15)
+  local scroll = ScrollView(activity)
+  local container = makeLayout(true, 10)
+  scroll.addView(container)
+  layout.addView(scroll, LinearLayout.LayoutParams(-1, 600))
+
+  container.addView(makeText("Loading notifications...", 14))
+
+  local dialog = AlertDialog.Builder(activity)
+    .setTitle("Notifications")
     .setView(layout)
     .setPositiveButton("Close", nil)
     .create()
 
   dialog.show()
 
-  notif_toggle_btn.setOnClickListener(function()
-    local current = sp.getBoolean("notif_sound_enabled", false)
-    local new_val = not current
-    sp.edit().putBoolean("notif_sound_enabled", new_val).apply()
-    notif_toggle_btn.setText("Notifications Sound (In-App): " .. (new_val and "ENABLED ON" or "DISABLED OFF"))
-    if new_val then
-      startBackgroundNotificationWatcher()
-      showToast("Notification alerts enabled.")
-    else
-      stopBackgroundNotificationWatcher()
-      showToast("Notification alerts turned off.")
-    end
-  end)
+  http_get(FIREBASE_URL .. "codes.json", function(success, response)
+    container.removeAllViews()
+    local notifs = {}
+    local seen_map = getSeenNotifsMap()
 
-  presence_toggle_btn.setOnClickListener(function()
-    local current = sp.getBoolean("share_presence_enabled", true)
-    local new_val = not current
-    sp.edit().putBoolean("share_presence_enabled", new_val).apply()
-    presence_toggle_btn.setText("Show Online / Last Seen: " .. (new_val and "VISIBLE ON" or "HIDDEN OFF"))
-    if not new_val then
-      http_delete(FIREBASE_URL .. "user_presence/" .. encodeKey(current_username) .. ".json", function() end)
-      showToast("Online status hidden from other users.")
-    else
-      updatePresence("online")
-      showToast("Online status is now visible.")
-    end
+    http_get(FIREBASE_URL .. "settings/broadcast.json", function(s_b, r_b)
+      if s_b and r_b and r_b ~= "null" then
+        local b_text = tostring(r_b)
+        local ok_b, dec_b = pcall(cjson.decode, r_b)
+        if ok_b and type(dec_b) == "string" then b_text = dec_b end
+        local b_key = "broadcast_" .. b_text
+        seen_map[b_key] = true
+        table.insert(notifs, {
+          text = "Announcement: " .. b_text,
+          time = "Admin Broadcast"
+        })
+      end
+
+      if success and response and response ~= "null" then
+        local ok, data = pcall(cjson.decode, response)
+        if ok and type(data) == "table" then
+          for k, v in pairs(data) do
+            if type(v) == "table" and trim(tostring(v.author or "")):lower() == trim(current_username):lower() then
+              if v.likes then
+                for liker, _ in pairs(v.likes) do
+                  local decoded_liker = Uri.decode(tostring(liker))
+                  if trim(decoded_liker):lower() ~= trim(current_username):lower() then
+                    local l_key = "like_" .. k .. "_" .. decoded_liker
+                    seen_map[l_key] = true
+                    table.insert(notifs, {
+                      text = decoded_liker .. " liked your code: " .. (v.title or "Untitled"),
+                      time = v.timestamp or ""
+                    })
+                  end
+                end
+              end
+              if v.comments then
+                for cid, c in pairs(v.comments) do
+                  if c.user and trim(tostring(c.user)):lower() ~= trim(current_username):lower() then
+                    local c_key = "com_" .. k .. "_" .. tostring(cid)
+                    seen_map[c_key] = true
+                    table.insert(notifs, {
+                      text = c.user .. " commented on \"" .. (v.title or "Untitled") .. "\": " .. (c.text or ""),
+                      time = c.timestamp or ""
+                    })
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      saveSeenNotifsMap(seen_map)
+
+      local total_count = #notifs
+      dialog.setTitle("Notifications (" .. tostring(total_count) .. ")")
+
+      if total_count == 0 then
+        container.addView(makeText("No notifications.", 15))
+      else
+        for _, n in ipairs(notifs) do
+          local card = makeLayout(true, 8)
+          card.setBackgroundColor(0xFFEEEEEE)
+          card.addView(makeText(n.text, 14))
+          card.addView(makeText(n.time, 11))
+          container.addView(card, LinearLayout.LayoutParams(-1, -2))
+        end
+      end
+      updateNotificationCount(true)
+    end)
   end)
 end
 
 -- ========================================================
--- SETTINGS VIEW
+-- PERSONAL CHAT (1-ON-1 WITH OFFLINE CACHE & BTP ASSISTANT AUTO-REPLY)
 -- ========================================================
 
-function createSettingsView()
-  local layout = makeLayout(true, 20)
-  CURRENT_VERSION = getCurrentAppVersion()
+local function getSymmetricChatKey(u1, u2)
+  local s1 = trim(tostring(u1 or "")):lower()
+  local s2 = trim(tostring(u2 or "")):lower()
+  if s1 < s2 then
+    return encodeKey(s1) .. "_" .. encodeKey(s2)
+  else
+    return encodeKey(s2) .. "_" .. encodeKey(s1)
+  end
+end
 
-  local check_update_btn = makeButton("Check for Update (Current: " .. CURRENT_VERSION .. ")")
-  check_update_btn.setContentDescription("Check for Update")
-  layout.addView(check_update_btn)
+function openPersonalChat(target_user)
+  local layout = makeLayout(true, 10)
 
-  check_update_btn.setOnClickListener(function()
-    checkUpdate(true)
+  local chat_header = makeLayout(false, 5)
+  local initial_status_label = isNetworkAvailable() and " (Checking...)" or " (Offline)"
+  local chat_title_tv = makeText(getVerifiedName(target_user) .. initial_status_label, 15)
+  chat_title_tv.setTextColor(0xFF1E88E5)
+  chat_header.addView(chat_title_tv, LinearLayout.LayoutParams(0, -2, 1))
+
+  local more_btn = makeButton("More Options")
+  chat_header.addView(more_btn, LinearLayout.LayoutParams(-2, -2))
+  layout.addView(chat_header)
+
+  local managed_by_ast_banner = makeText("This chat is managed by BTP Assistant when user is offline.", 12)
+  managed_by_ast_banner.setBackgroundColor(0xFFEDE7F6)
+  managed_by_ast_banner.setTextColor(0xFF4A148C)
+  managed_by_ast_banner.setPadding(8, 6, 8, 6)
+  managed_by_ast_banner.setVisibility(View.GONE)
+  layout.addView(managed_by_ast_banner)
+
+  local block_notice_banner = makeText("", 13)
+  block_notice_banner.setTextColor(0xFFD32F2F)
+  block_notice_banner.setPadding(6, 6, 6, 6)
+  block_notice_banner.setVisibility(View.GONE)
+  layout.addView(block_notice_banner)
+
+  local scroll = ScrollView(activity)
+  local chat_container = makeLayout(true, 8)
+  scroll.addView(chat_container)
+  layout.addView(scroll, LinearLayout.LayoutParams(-1, 310))
+
+  local reply_banner = makeLayout(false, 8)
+  reply_banner.setBackgroundColor(0xFFE0E0E0)
+  reply_banner.setVisibility(View.GONE)
+
+  local reply_text_preview = makeText("", 12)
+  reply_text_preview.setTextColor(0xFF333333)
+  reply_banner.addView(reply_text_preview, LinearLayout.LayoutParams(0, -2, 1))
+
+  local cancel_reply_btn = makeButton("Cancel Reply")
+  reply_banner.addView(cancel_reply_btn, LinearLayout.LayoutParams(-2, -2))
+  layout.addView(reply_banner)
+
+  local active_reply_target = nil
+
+  cancel_reply_btn.setOnClickListener(function()
+    active_reply_target = nil
+    reply_banner.setVisibility(View.GONE)
   end)
 
-  local change_name = makeButton("Change Username")
-  layout.addView(change_name)
+  local input_layout = makeLayout(false, 4)
+  local msg_input = EditText(activity)
+  msg_input.setHint("Type a message...")
+  input_layout.addView(msg_input, LinearLayout.LayoutParams(0, -2, 1))
 
-  local more_options_btn = makeButton("More Options (Create Group & Groups)")
-  layout.addView(more_options_btn)
+  local send_btn = makeButton("Send")
+  input_layout.addView(send_btn, LinearLayout.LayoutParams(-2, -2))
+  layout.addView(input_layout)
 
-  more_options_btn.setOnClickListener(function()
-    local opts = {"Create New Group", "View All Groups"}
-    AlertDialog.Builder(activity)
-      .setTitle("More Options")
-      .setItems(opts, DialogInterface.OnClickListener{
-        onClick = function(d, w)
-          if w == 0 then
-            showCreateGroupDialog(function()
-              showGroupsListDialog()
-            end)
-          else
-            showGroupsListDialog()
+  local voice_section = makeLayout(true, 6)
+  voice_section.setBackgroundColor(0xFFECEFF1)
+
+  local voice_status_tv = makeText("", 12)
+  voice_status_tv.setTextColor(0xFF37474F)
+  voice_status_tv.setVisibility(View.GONE)
+  voice_section.addView(voice_status_tv)
+
+  local voice_main_btn = makeButton("Record Voice Message")
+  voice_section.addView(voice_main_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local voice_call_btn = makeButton("Live Voice Call")
+  voice_section.addView(voice_call_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local voice_action_row = makeLayout(false, 2)
+  voice_action_row.setVisibility(View.GONE)
+  local voice_preview_btn = makeButton("Preview")
+  local voice_send_preview_btn = makeButton("Send Voice")
+  local voice_discard_btn = makeButton("Discard")
+
+  voice_action_row.addView(voice_preview_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_action_row.addView(voice_send_preview_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_action_row.addView(voice_discard_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_section.addView(voice_action_row)
+
+  layout.addView(voice_section)
+
+  local go_back_btn = makeButton("Go Back")
+  layout.addView(go_back_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local dialog = AlertDialog.Builder(activity)
+    .setTitle(getVerifiedName(target_user) .. initial_status_label)
+    .setView(layout)
+    .setCancelable(true)
+    .create()
+
+  dialog.show()
+
+  local room_key = getSymmetricChatKey(current_username, target_user)
+  local cache_key_pchat = "pchat_cache_" .. room_key
+  local seen_message_ids = {}
+  local is_chat_active = true
+  local is_initial_load = true
+  local chat_open_time = os.date("%Y%m%d%H%M%S")
+  local last_rendered_data_hash = ""
+  local live_handler = Handler(Looper.getMainLooper())
+  local live_runnable = nil
+
+  local is_blocked_by_them = false
+  local is_blocked_by_me = false
+  local target_is_currently_online = false
+  local target_personal_ast_cfg = nil
+
+  local voice_state = "idle"
+  local media_recorder = nil
+  local preview_player = nil
+  local recorded_file_path = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_voice_rec.m4a"
+  local record_seconds = 0
+  local record_timer_handler = Handler(Looper.getMainLooper())
+  local record_timer_runnable = nil
+
+  local function stopPreviewPlayer()
+    if preview_player ~= nil then
+      pcall(function()
+        if preview_player.isPlaying() then preview_player.stop() end
+        preview_player.release()
+      end)
+      preview_player = nil
+    end
+    voice_preview_btn.setText("Preview")
+  end
+
+  local function resetVoiceUI()
+    voice_state = "idle"
+    record_seconds = 0
+    if record_timer_runnable then
+      pcall(function() record_timer_handler.removeCallbacks(record_timer_runnable) end)
+      record_timer_runnable = nil
+    end
+    if media_recorder ~= nil then
+      pcall(function()
+        media_recorder.stop()
+        media_recorder.release()
+      end)
+      media_recorder = nil
+    end
+    stopPreviewPlayer()
+    voice_main_btn.setText("Record Voice Message")
+    voice_main_btn.setVisibility(View.VISIBLE)
+    voice_action_row.setVisibility(View.GONE)
+    voice_status_tv.setVisibility(View.GONE)
+    voice_status_tv.setText("")
+  end
+
+  local function stopChatPolling()
+    is_chat_active = false
+    resetVoiceUI()
+    stopActiveVoicePlayer(false)
+    current_voice_playlist = {}
+    if live_handler and live_runnable then
+      pcall(function() live_handler.removeCallbacks(live_runnable) end)
+      live_runnable = nil
+    end
+    updateNotificationCount(true)
+  end
+
+  go_back_btn.setOnClickListener(function()
+    stopChatPolling()
+    dialog.dismiss()
+  end)
+
+  dialog.setOnDismissListener(DialogInterface.OnDismissListener{ onDismiss = stopChatPolling })
+  dialog.setOnCancelListener(DialogInterface.OnCancelListener{ onCancel = stopChatPolling })
+
+  voice_call_btn.setOnClickListener(function()
+    if is_blocked_by_them or is_blocked_by_me then
+      showToast("Cannot place voice call while blocked.")
+      return
+    end
+    initiateVoiceCall("direct", target_user, getVerifiedName(target_user), {target_user})
+  end)
+
+  local function checkTargetPersonalAssistantConfig()
+    if not is_chat_active or not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "personal_assistants/" .. encodeKey(target_user) .. ".json", function(s, r)
+      if not is_chat_active then return end
+      if s and r and r ~= "null" then
+        local ok, cfg = pcall(cjson.decode, r)
+        if ok and type(cfg) == "table" and (cfg.enabled == true or cfg.enabled == "true") then
+          target_personal_ast_cfg = cfg
+          managed_by_ast_banner.setText("This chat is managed by BTP Assistant when " .. target_user .. " is offline.")
+          managed_by_ast_banner.setVisibility(View.VISIBLE)
+          return
+        end
+      end
+      target_personal_ast_cfg = nil
+      managed_by_ast_banner.setVisibility(View.GONE)
+    end)
+  end
+
+  local function renderPersonalMessagesFromRaw(raw_json_str, force_refresh, from_network)
+    local msg_list = {}
+    local current_hash_builder = {}
+
+    if raw_json_str and raw_json_str ~= "null" then
+      local ok, data = pcall(cjson.decode, raw_json_str)
+      if ok and type(data) == "table" then
+        for k, v in pairs(data) do
+          if type(v) == "table" then
+            v.id = k
+            table.insert(msg_list, v)
+            if from_network then
+              local base_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. k
+              if trim(tostring(v.receiver or "")):lower() == trim(current_username):lower() then
+                markMessageSeenInFirebase(base_msg_url)
+                if v.status ~= "Read" then
+                  v.status = "Read"
+                  http_post_or_put(base_msg_url .. "/status.json", "PUT", "Read", function() end)
+                end
+              end
+            end
           end
         end
-      }).show()
-  end)
+      end
+    end
 
-  local notif_privacy_btn = makeButton("Notification & Privacy Settings")
-  layout.addView(notif_privacy_btn)
-
-  notif_privacy_btn.setOnClickListener(function()
-    showNotificationPrivacyDialog()
-  end)
-
-  local admin_panel_container = makeLayout(true, 0)
-  layout.addView(admin_panel_container)
-
-  loadVerifiedUsers(function()
-    loadAdminUsers(function()
-      syncServerAndRoomSettings(function()
-        local is_ver = isVerifiedUser(current_username)
-        local is_adm = isAdminUser(current_username)
-        if is_ver or is_adm then
-          admin_panel_container.removeAllViews()
-          local btn_label = is_ver and "Admin Panel (Verified / Developer)" or "Admin Panel (Admin)"
-          local admin_panel_btn = makeButton(btn_label)
-          admin_panel_btn.setBackgroundColor(0xFF2E7D32)
-          admin_panel_btn.setTextColor(0xFFFFFFFF)
-          admin_panel_container.addView(admin_panel_btn)
-
-          admin_panel_btn.setOnClickListener(function()
-            showAdminPanelDialog()
-          end)
-        end
-      end)
+    table.sort(msg_list, function(a, b)
+      return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
     end)
-  end)
 
-  local about_app = makeButton("About Application")
-  layout.addView(about_app)
+    local new_reaction_on_my_msg = false
+    for _, m in ipairs(msg_list) do
+      local r_pairs = {}
+      if type(m.reactions) == "table" then
+        for rk, rv in pairs(m.reactions) do
+          table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
+          local rx_unique = "p_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
+          if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
+            if not is_initial_load and not known_reaction_keys[rx_unique] then
+              new_reaction_on_my_msg = true
+            end
+          end
+          known_reaction_keys[rx_unique] = true
+        end
+      end
+      table.sort(r_pairs)
+      local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
+      local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
+      local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
+      table.insert(current_hash_builder, tostring(m.id) .. ":" .. tostring(m.status or "") .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
+    end
+    local current_data_hash = table.concat(current_hash_builder, "|")
 
-  local feedback = makeButton("Send Feedback via WhatsApp")
-  layout.addView(feedback)
+    if new_reaction_on_my_msg and is_chat_active and from_network then
+      playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
 
-  change_name.setOnClickListener(function()
-    local input = EditText(activity)
-    input.setText(current_username)
-    AlertDialog.Builder(activity)
-      .setTitle("Change Username")
-      .setView(input)
-      .setPositiveButton("Save", DialogInterface.OnClickListener{
-        onClick = function()
-          local name = trim(input.getText())
-          if name ~= "" then
-            sp.edit().putString("username", name).apply()
-            current_username = name
-            registerUserToFirebase(name)
-            updatePresence("online")
-            showToast("Username updated.")
-            initMainWindow()
+    if current_data_hash == last_rendered_data_hash and not is_initial_load and not force_refresh then
+      return
+    end
+
+    if active_voice_player ~= nil and not force_refresh then
+      return
+    end
+
+    local new_incoming_msg = false
+    for _, m in ipairs(msg_list) do
+      if not seen_message_ids[m.id] then
+        seen_message_ids[m.id] = true
+        if from_network and not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > chat_open_time then
+          new_incoming_msg = true
+        end
+      end
+    end
+
+    last_rendered_data_hash = current_data_hash
+    chat_container.removeAllViews()
+    local room_voice_playlist = {}
+
+    if #msg_list == 0 then
+      chat_container.addView(makeText("No messages yet. Say hello!", 14))
+    else
+      local last_day_header = ""
+      for _, msg in ipairs(msg_list) do
+        local day_lbl = getDayLabelFromRaw(msg.timestamp_raw)
+        if day_lbl ~= "" and day_lbl ~= last_day_header then
+          last_day_header = day_lbl
+          chat_container.addView(createAccessibleDayHeader(day_lbl), LinearLayout.LayoutParams(-1, -2))
+        end
+
+        local is_me = (trim(tostring(msg.sender or "")):lower() == trim(tostring(current_username or "")):lower())
+        local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
+        local is_ast_auto = (msg.is_assistant_auto == true or msg.is_assistant_auto == "true")
+        local bubble = makeLayout(true, 8)
+        if is_me then
+          bubble.setBackgroundColor(0xFFDCF8C6)
+        elseif is_ast_auto then
+          bubble.setBackgroundColor(0xFFF3E5F5)
+        else
+          bubble.setBackgroundColor(0xFFFFFFFF)
+        end
+        bubble.setPadding(12, 10, 12, 10)
+
+        if is_deleted_all then
+          bubble.setClickable(false)
+          bubble.setFocusable(true)
+          local del_tv = makeText("This message was deleted", 13)
+          del_tv.setTextColor(0xFF757575)
+          bubble.addView(del_tv)
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+        else
+          bubble.setClickable(true)
+          bubble.setFocusable(true)
+
+          if msg.reply_to and type(msg.reply_to) == "table" then
+            local quote_box = makeLayout(true, 6)
+            quote_box.setBackgroundColor(0xFFE8E8E8)
+            quote_box.setPadding(8, 6, 8, 6)
+            quote_box.addView(makeText("Replying to " .. getVerifiedName(msg.reply_to.sender) .. ":", 11))
+            local q_preview = tostring(msg.reply_to.text or "")
+            if #q_preview > 80 then q_preview = q_preview:sub(1, 80) .. "..." end
+            local q_tv = makeText(q_preview, 12)
+            q_tv.setTextColor(0xFF555555)
+            quote_box.addView(q_tv)
+            bubble.addView(quote_box, LinearLayout.LayoutParams(-1, -2))
+          end
+
+          local sender_label = is_me and "You" or (is_ast_auto and ("BTP Assistant (for " .. tostring(msg.sender or target_user) .. ")") or getVerifiedName(msg.sender))
+          if msg.msg_type == "voice" and msg.audio_base64 then
+            local dur_str = tostring(msg.audio_duration or "0") .. "s"
+            local voice_title = makeText(sender_label .. ": Voice message (" .. dur_str .. ")", 14)
+            voice_title.setPadding(0, 4, 0, 4)
+            bubble.addView(voice_title)
+            local fb_msg_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. tostring(msg.id)
+            buildVoiceBubblePlayer(bubble, msg, dur_str, room_voice_playlist, fb_msg_url)
+          else
+            local msg_content_tv = makeText(sender_label .. ": " .. (msg.text or ""), 14)
+            msg_content_tv.setPadding(0, 4, 0, 4)
+            bubble.addView(msg_content_tv)
+          end
+
+          renderClickableReactions(bubble, msg.reactions)
+
+          local seen_txt = formatSeenByText(msg.seen_by)
+          local meta_line = tostring(msg.timestamp or "")
+          if is_me and seen_txt ~= "" then
+            meta_line = meta_line .. " • " .. seen_txt
+          end
+
+          local meta_tv = makeText(meta_line, 11)
+          meta_tv.setTextColor(0xFF777777)
+          bubble.addView(meta_tv)
+
+          chat_container.addView(bubble, LinearLayout.LayoutParams(-1, -2))
+
+          bubble.setOnClickListener(View.OnClickListener{
+            onClick = function()
+              local opts = {"Reply", "Add Reaction", "Delete for Me", "Delete for Everyone"}
+              AlertDialog.Builder(activity)
+                .setTitle("Message Options")
+                .setItems(opts, DialogInterface.OnClickListener{
+                  onClick = function(d_sub, which)
+                    local choice = opts[which + 1]
+                    if choice == "Reply" then
+                      active_reply_target = { sender = msg.sender, text = msg.text }
+                      reply_text_preview.setText("Replying to " .. tostring(msg.sender or "") .. ":\n" .. tostring(msg.text or ""))
+                      reply_banner.setVisibility(View.VISIBLE)
+                      msg_input.requestFocus()
+                    elseif choice == "Add Reaction" then
+                      local reactions_list = {"Love", "Like", "Haha", "Fire", "Clap", "Wow"}
+                      AlertDialog.Builder(activity)
+                        .setTitle("Select Reaction")
+                        .setItems(reactions_list, DialogInterface.OnClickListener{
+                          onClick = function(d_emo, ew)
+                            local selected_rx = reactions_list[ew + 1]
+                            http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id .. "/reactions/" .. encodeKey(current_username) .. ".json", "PUT", selected_rx, function(rok)
+                              if rok then
+                                playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+                                loadMessages(true)
+                              end
+                            end)
+                          end
+                        }).show()
+                    elseif choice == "Delete for Me" then
+                      bubble.setVisibility(View.GONE)
+                      showToast("Deleted for you.")
+                    elseif choice == "Delete for Everyone" then
+                      local del_url = FIREBASE_URL .. "personal_chats/" .. room_key .. "/" .. msg.id
+                      http_post_or_put(del_url .. "/deleted_for_everyone.json", "PUT", true, function(ok)
+                        if ok then
+                          http_post_or_put(del_url .. "/text.json", "PUT", "This message was deleted", function() end)
+                          http_delete(del_url .. "/audio_base64.json", function() end)
+                          showToast("Deleted for everyone.")
+                          loadMessages(true)
+                        else
+                          showToast("Failed to delete message.")
+                        end
+                      end)
+                    end
+                  end
+                }).show()
+            end
+          })
+        end
+      end
+    end
+
+    current_voice_playlist = room_voice_playlist
+
+    if is_initial_load or new_incoming_msg then
+      scroll.post(Runnable({
+        run = function()
+          scroll.fullScroll(ScrollView.FOCUS_DOWN)
+        end
+      }))
+    end
+
+    if new_incoming_msg and is_chat_active and from_network then
+      playSound(SOUND_RECEIVE, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+    if from_network then
+      is_initial_load = false
+    end
+  end
+
+  local function loadMessages(force_refresh)
+    if not is_chat_active then return end
+    if is_initial_load then
+      local cached_raw = loadOfflineCache(cache_key_pchat)
+      if cached_raw then
+        renderPersonalMessagesFromRaw(cached_raw, true, false)
+      end
+    end
+    if not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "personal_chats/" .. room_key .. '.json?orderBy="$key"&limitToLast=80', function(success, response)
+      if not is_chat_active then return end
+      if success and response and response ~= "null" then
+        saveOfflineCache(cache_key_pchat, response)
+      end
+      renderPersonalMessagesFromRaw(success and response or nil, force_refresh, true)
+    end)
+  end
+
+  local function executeVoiceSendAfterPreSound(duration_sec)
+    voice_status_tv.setText("Sending voice message...")
+    voice_status_tv.setVisibility(View.VISIBLE)
+    voice_main_btn.setEnabled(false)
+    voice_send_preview_btn.setEnabled(false)
+
+    local b64_audio = encodeFileToBase64(recorded_file_path)
+    if not b64_audio or b64_audio == "" then
+      showToast("Recording failed or empty audio.")
+      voice_main_btn.setEnabled(true)
+      voice_send_preview_btn.setEnabled(true)
+      resetVoiceUI()
+      return
+    end
+
+    local payload = {
+      sender = current_username,
+      receiver = target_user,
+      msg_type = "voice",
+      text = "Voice message (" .. tostring(duration_sec) .. "s)",
+      audio_base64 = b64_audio,
+      audio_duration = duration_sec,
+      status = "Sent",
+      timestamp = os.date("%I:%M %p"),
+      timestamp_raw = os.date("%Y%m%d%H%M%S")
+    }
+
+    if active_reply_target ~= nil then
+      payload.reply_to = active_reply_target
+      active_reply_target = nil
+      reply_banner.setVisibility(View.GONE)
+    end
+
+    http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", "POST", payload, function(success)
+      voice_main_btn.setEnabled(true)
+      voice_send_preview_btn.setEnabled(true)
+      resetVoiceUI()
+      if success then
+        playSound(SOUND_SEND, nil, ToneGenerator.TONE_PROP_BEEP, false)
+        showToast("Voice message sent!")
+        loadMessages(true)
+      else
+        showToast("Failed to send voice message.")
+      end
+    end)
+  end
+
+  local function sendVoicePayload(duration_sec)
+    if notifyServerDownIfNeeded() then
+      resetVoiceUI()
+      return
+    end
+    playSound(SOUND_VOICE_PRE_SEND, function()
+      executeVoiceSendAfterPreSound(duration_sec)
+    end, ToneGenerator.TONE_PROP_PROMPT, false)
+  end
+
+  local function finishRecordingToState(target_mode)
+    local final_sec = record_seconds
+    if final_sec < 1 then final_sec = 1 end
+    if record_timer_runnable then
+      pcall(function() record_timer_handler.removeCallbacks(record_timer_runnable) end)
+      record_timer_runnable = nil
+    end
+    if media_recorder ~= nil then
+      pcall(function()
+        media_recorder.stop()
+        media_recorder.release()
+      end)
+      media_recorder = nil
+    end
+
+    if target_mode == "send" then
+      sendVoicePayload(final_sec)
+    else
+      voice_state = "preview"
+      voice_main_btn.setVisibility(View.GONE)
+      voice_action_row.setVisibility(View.VISIBLE)
+      voice_preview_btn.setText("Preview (" .. tostring(final_sec) .. "s)")
+      voice_status_tv.setText("Recorded " .. tostring(final_sec) .. "s")
+      voice_status_tv.setVisibility(View.VISIBLE)
+    end
+  end
+
+  voice_main_btn.setOnClickListener(function()
+    if is_blocked_by_them or is_blocked_by_me then
+      showToast("Cannot send voice message while blocked.")
+      return
+    end
+    if notifyServerDownIfNeeded() then return end
+
+    if voice_state == "idle" then
+      stopActiveVoicePlayer(false)
+      local old_f = File(recorded_file_path)
+      if old_f.exists() then old_f.delete() end
+
+      media_recorder = startHighClarityRecording(recorded_file_path)
+      if media_recorder == nil then
+        showToast("Microphone permission required to record voice.")
+        return
+      end
+
+      voice_state = "recording"
+      record_seconds = 0
+      voice_main_btn.setText("Stop and Send Voice")
+      voice_action_row.setVisibility(View.VISIBLE)
+      voice_preview_btn.setText("Stop and Preview")
+      voice_send_preview_btn.setText("Send Now")
+      voice_discard_btn.setText("Discard")
+      voice_status_tv.setText("Recording: 0s")
+      voice_status_tv.setVisibility(View.VISIBLE)
+
+      record_timer_runnable = Runnable({
+        run = function()
+          if voice_state == "recording" and is_chat_active then
+            record_seconds = record_seconds + 1
+            voice_status_tv.setText("Recording: " .. tostring(record_seconds) .. "s")
+            if record_seconds >= MAX_VOICE_SECONDS then
+              finishRecordingToState("send")
+            else
+              record_timer_handler.postDelayed(record_timer_runnable, 1000)
+            end
           end
         end
       })
-      .setNegativeButton("Cancel", nil)
-      .show()
-  end)
+      record_timer_handler.postDelayed(record_timer_runnable, 1000)
 
-  about_app.setOnClickListener(function()
-    CURRENT_VERSION = getCurrentAppVersion()
-    showMessage(
-      "About This App",
-      APP_TITLE .. "\n" .. APP_DEV .. "\nVersion: " .. CURRENT_VERSION .. "\n\n"
-      .. "A fast, accessible community and code-sharing hub built for creators and developers. "
-      .. "Includes BTP Assistant for smart Q&A and code help, BTP Voice Room, community groups, "
-      .. "direct chats with voice messages and calls, and clean screen-reader support."
-    )
-  end)
-
-  feedback.setOnClickListener(function()
-    local url = "https://api.whatsapp.com/send?phone=917481878723&text=" .. Uri.encode("Feedback for " .. APP_TITLE)
-    local intent = Intent(Intent.ACTION_VIEW)
-    intent.setData(Uri.parse(url))
-    pcall(function() activity.startActivity(intent) end)
-  end)
-
-  return layout
-end
-
--- ========================================================
--- MAIN APPLICATION WINDOW
--- ========================================================
-
-function initMainWindow()
-  local root = makeLayout(true, 0)
-  root.setBackgroundColor(0xFFF5F5F5)
-
-  local header = makeLayout(true, 14)
-  header.setBackgroundColor(0xFF1E88E5)
-
-  local title = makeText(APP_TITLE, 18)
-  title.setTextColor(0xFFFFFFFF)
-  header.addView(title)
-
-  local dev_label = makeText(APP_DEV, 13)
-  dev_label.setTextColor(0xFFE3F2FD)
-  header.addView(dev_label)
-
-  local user_label = makeText("User: " .. getVerifiedName(current_username), 13)
-  user_label.setTextColor(0xFFFFF176)
-  header.addView(user_label)
-
-  notif_button = makeButton("Notifications")
-  notif_button.setOnClickListener(function() showNotificationsDialog() end)
-  header.addView(notif_button, LinearLayout.LayoutParams(-1, -2))
-  root.addView(header)
-
-  local nav_bar = makeLayout(false, 2)
-  nav_bar.setBackgroundColor(0xFFE0E0E0)
-
-  local home_btn = makeButton("Home")
-  chat_tab_btn = makeButton("Chat")
-  local upload_btn = makeButton("Upload Code")
-  local my_codes_btn = makeButton("My Codes")
-  local settings_btn = makeButton("Settings")
-
-  local nav_params = LinearLayout.LayoutParams(0, -2, 1)
-  nav_bar.addView(home_btn, nav_params)
-  nav_bar.addView(chat_tab_btn, nav_params)
-  nav_bar.addView(upload_btn, nav_params)
-  nav_bar.addView(my_codes_btn, nav_params)
-  nav_bar.addView(settings_btn, nav_params)
-  root.addView(nav_bar)
-
-  main_content = FrameLayout(activity)
-  root.addView(main_content, LinearLayout.LayoutParams(-1, 0, 1))
-
-  activity.setContentView(root)
-
-  local home_view = createHomeFeedView()
-  local my_view = createMyUploadsView()
-
-  local function showOnlyView(view)
-    main_content.removeAllViews()
-    main_content.addView(view)
-  end
-
-  home_btn.setOnClickListener(function()
-    showOnlyView(home_view)
-    loadCodesData()
-  end)
-
-  chat_tab_btn.setOnClickListener(function()
-    showResourceChatDialog()
-  end)
-
-  upload_btn.setOnClickListener(function()
-    showUploadCodeDialog()
-  end)
-
-  my_codes_btn.setOnClickListener(function()
-    showOnlyView(my_view)
-    loadMyUploadsData()
-  end)
-
-  settings_btn.setOnClickListener(function()
-    local settings_view = createSettingsView()
-    showOnlyView(settings_view)
-  end)
-
-  showOnlyView(home_view)
-  loadCodesData()
-  updateNotificationCount(true)
-
-  if sp.getBoolean("notif_sound_enabled", false) then
-    startBackgroundNotificationWatcher()
-  end
-end
-
--- ========================================================
--- LIFECYCLE HOOKS: ZERO BACKGROUND NETWORK/DATA USAGE
--- ========================================================
-
-function onPause()
-  isAppForeground = false
-  stopBackgroundNotificationWatcher()
-  stopIncomingCallWatcher()
-  stopPresenceTracking()
-end
-
-function onResume()
-  isAppForeground = true
-  if current_username ~= "" then
-    startPresenceTracking()
-    startIncomingCallWatcher()
-    if sp.getBoolean("notif_sound_enabled", false) then
-      startBackgroundNotificationWatcher()
+    elseif voice_state == "recording" then
+      finishRecordingToState("send")
     end
-  end
-end
+  end)
 
-function onStop()
-  isAppForeground = false
-  stopActiveVoicePlayer(false)
-  stopBackgroundNotificationWatcher()
-  stopIncomingCallWatcher()
-  stopPresenceTracking()
-  resetCallAudioMode()
-end
+  voice_preview_btn.setOnClickListener(function()
+    if voice_state == "recording" then
+      finishRecordingToState("preview")
+      voice_send_preview_btn.setText("Send Voice")
+      return
+    end
 
-function onDestroy()
-  isAppForeground = false
-  stopActiveVoicePlayer(false)
-  stopBackgroundNotificationWatcher()
-  stopIncomingCallWatcher()
-  stopPresenceTracking()
-  resetCallAudioMode()
-  updatePresence("offline")
-end
-
--- ========================================================
--- STARTUP SEQUENCE
--- ========================================================
-
-if current_username == "" then
-  showWelcomeDialog()
-else
-  initMainWindow()
-
-  registerUserToFirebase(current_username)
-  startPresenceTracking()
-  startIncomingCallWatcher()
-
-  loadVerifiedUsers(function()
-    loadAdminUsers(function()
-      syncServerAndRoomSettings(function()
-        loadBlockedUsers(function()
-          checkBlockStatus(function()
-            checkPopupAnnouncementNote()
-          end)
-        end)
+    if voice_state == "preview" then
+      if preview_player ~= nil then
+        stopPreviewPlayer()
+        return
+      end
+      pcall(function()
+        local f = File(recorded_file_path)
+        if f.exists() then
+          preview_player = MediaPlayer()
+          preview_player.setDataSource(recorded_file_path)
+          preview_player.prepare()
+          preview_player.start()
+          voice_preview_btn.setText("Stop Preview")
+          preview_player.setOnCompletionListener(MediaPlayer.OnCompletionListener{
+            onCompletion = function()
+              stopPreviewPlayer()
+            end
+          })
+        end
       end)
+    end
+  end)
+
+  voice_send_preview_btn.setOnClickListener(function()
+    if voice_state == "recording" then
+      finishRecordingToState("send")
+    elseif voice_state == "preview" then
+      stopPreviewPlayer()
+      local sec = record_seconds > 0 and record_seconds or 1
+      sendVoicePayload(sec)
+    end
+  end)
+
+  voice_discard_btn.setOnClickListener(function()
+    playSound(SOUND_DISCARD, nil, ToneGenerator.TONE_PROP_NACK, false)
+    resetVoiceUI()
+    showToast("Voice recording discarded.")
+  end)
+
+  local function checkPeerBlockStatus()
+    if not is_chat_active or not isNetworkAvailable() then return end
+    http_get(FIREBASE_URL .. "user_blocks/" .. encodeKey(target_user) .. "/" .. encodeKey(current_username) .. ".json", function(s1, r1)
+      if not is_chat_active then return end
+      is_blocked_by_them = (s1 and (r1 == "true" or r1 == '"true"'))
+
+      http_get(FIREBASE_URL .. "user_blocks/" .. encodeKey(current_username) .. "/" .. encodeKey(target_user) .. ".json", function(s2, r2)
+        if not is_chat_active then return end
+        is_blocked_by_me = (s2 and (r2 == "true" or r2 == '"true"'))
+
+        if is_blocked_by_them then
+          block_notice_banner.setText("Notice: You have been blocked by this user. You cannot send messages.")
+          block_notice_banner.setVisibility(View.VISIBLE)
+          msg_input.setEnabled(false)
+          send_btn.setEnabled(false)
+          voice_main_btn.setEnabled(false)
+          voice_call_btn.setEnabled(false)
+        elseif is_blocked_by_me then
+          block_notice_banner.setText("Notice: You have blocked this user. Unblock from More Options to chat.")
+          block_notice_banner.setVisibility(View.VISIBLE)
+          msg_input.setEnabled(false)
+          send_btn.setEnabled(false)
+          voice_main_btn.setEnabled(false)
+          voice_call_btn.setEnabled(false)
+        else
+          block_notice_banner.setVisibility(View.GONE)
+          msg_input.setEnabled(true)
+          send_btn.setEnabled(true)
+          voice_main_btn.setEnabled(true)
+          voice_call_btn.setEnabled(true)
+        end
+      end)
+    end)
+  end
+
+  local function checkTargetPresence()
+    if not is_chat_active then return end
+    local base_name = getVerifiedName(target_user)
+    if not isNetworkAvailable() then
+      target_is_currently_online = false
+      chat_title_tv.setText(base_name .. " (Offline)")
+      dialog.setTitle(base_name .. " (Offline)")
+      return
+    end
+    http_get(FIREBASE_URL .. "user_presence/" .. encodeKey(target_user) .. ".json", function(s, r)
+      if not is_chat_active then return end
+      if s and r and r ~= "null" then
+        local ok, data = pcall(cjson.decode, r)
+        if ok and type(data) == "table" then
+          local current_time = os.time()
+          local last_time = tonumber(data.time_epoch or 0)
+          if data.status == "online" and (current_time - last_time < 240) then
+            target_is_currently_online = true
+            chat_title_tv.setText(base_name .. " (Online)")
+            dialog.setTitle(base_name .. " (Online)")
+          else
+            target_is_currently_online = false
+            local ls = tostring(data.last_seen or "Offline")
+            chat_title_tv.setText(base_name .. " (" .. ls .. ")")
+            dialog.setTitle(base_name .. " (" .. ls .. ")")
+          end
+          return
+        end
+      end
+      target_is_currently_online = false
+      chat_title_tv.setText(base_name .. " (Offline)")
+      dialog.setTitle(base_name .. " (Offline)")
+    end)
+  end
+
+  checkPeerBlockStatus()
+  checkTargetPresence()
+  checkTargetPersonalAssistantConfig()
+  loadMessages(true)
+
+  live_runnable = Runnable({
+    run = function()
+      if is_chat_active and isAppForeground then
+        loadMessages(false)
+        checkPeerBlockStatus()
+        checkTargetPresence()
+        checkTargetPersonalAssistantConfig()
+        live_handler.postDelayed(live_runnable, CHAT_POLL_INTERVAL_MS)
+      end
+    end
+  })
+  live_handler.postDelayed(live_runnable, CHAT_POLL_INTERVAL_MS)
+
+  more_btn.setOnClickListener(function()
+    http_get(FIREBASE_URL .. "user_blocks/" .. encodeKey(current_username) .. "/" .. encodeKey(target_user) .. ".json", function(s_blk, r_blk)
+      local currently_blocked = (s_blk and (r_blk == "true" or r_blk == '"true"'))
+      local block_action_title = currently_blocked and "Unblock User" or "Block User"
+      local choices = {"Clear Chat", block_action_title, "My Personal BTP Assistant Settings"}
+
+      AlertDialog.Builder(activity)
+        .setTitle("More Options")
+        .setItems(choices, DialogInterface.OnClickListener{
+          onClick = function(d_choice, w)
+            local selected = choices[w + 1]
+            if selected == "Clear Chat" then
+              http_delete(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", function(ok)
+                if ok then
+                  saveOfflineCache(cache_key_pchat, "{}")
+                  showToast("Chat cleared.")
+                  loadMessages(true)
+                end
+              end)
+            elseif selected == "Block User" then
+              http_post_or_put(FIREBASE_URL .. "user_blocks/" .. encodeKey(current_username) .. "/" .. encodeKey(target_user) .. ".json", "PUT", true, function(ok)
+                if ok then
+                  showToast("User blocked successfully.")
+                  checkPeerBlockStatus()
+                end
+              end)
+            elseif selected == "Unblock User" then
+              http_delete(FIREBASE_URL .. "user_blocks/" .. encodeKey(current_username) .. "/" .. encodeKey(target_user) .. ".json", function(ok)
+                if ok then
+                  showToast("User unblocked successfully.")
+                  checkPeerBlockStatus()
+                end
+              end)
+            elseif selected == "My Personal BTP Assistant Settings" then
+              showPersonalAssistantSetupDialog()
+            end
+          end
+        }).show()
     end)
   end)
 
-  Handler(Looper.getMainLooper()).postDelayed(Runnable({
-    run = function()
-      checkUpdate(false)
-    end
-  }), 3000)
+  local function triggerOfflineAssistantReplyIfNeeded(user_msg_text)
+    if target_is_currently_online then return end
+    if type(target_personal_ast_cfg) ~= "table" then return end
+    if not (target_personal_ast_cfg.enabled == true or target_personal_ast_cfg.enabled == "true") then return end
 
-  local cleanup_handler = Handler(Looper.getMainLooper())
-  cleanup_handler.postDelayed(Runnable({
-    run = function()
-      runSilentAutoCleanup()
+    local user_train = type(target_personal_ast_cfg.training) == "table" and target_personal_ast_cfg.training or {}
+    local away_prefix = trim(tostring(target_personal_ast_cfg.away_message or ""))
+    local trained_ctx = buildTrainedKnowledgeContext(user_msg_text, user_train)
+
+    local prompt = "You are BTP Assistant replying on behalf of " .. target_user .. " because " .. target_user .. " is currently offline. "
+      .. (away_prefix ~= "" and ("Owner note: " .. away_prefix .. ". ") or "")
+      .. (trained_ctx ~= "" and ("Owner trained info: " .. trained_ctx .. ". ") or "")
+      .. "Message from " .. current_username .. ": " .. user_msg_text
+      .. "\nReply politely, concisely, and naturally as BTP Assistant without emojis."
+
+    fetchAssistantReplyWithFallback({backendId = "gemini-flash"}, prompt, user_msg_text, function(ok, ast_reply)
+      local final_reply = (ok and ast_reply ~= "") and ast_reply or (away_prefix ~= "" and away_prefix or (target_user .. " is currently offline. Main BTP Assistant hoon, aapka message note kar liya gaya hai."))
+      final_reply = enforceBtpAssistantIdentity(final_reply)
+
+      local ast_payload = {
+        sender = target_user,
+        receiver = current_username,
+        msg_type = "text",
+        is_assistant_auto = true,
+        text = final_reply,
+        status = "Sent",
+        timestamp = os.date("%I:%M %p"),
+        timestamp_raw = os.date("%Y%m%d%H%M%S")
+      }
+      http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", "POST", ast_payload, function(post_ok)
+        if post_ok and is_chat_active then
+          loadMessages(true)
+        end
+      end)
+    end, user_train)
+  end
+
+  send_btn.setOnClickListener(function()
+    if is_blocked_by_them then
+      showToast("You cannot send messages because you are blocked by this user.")
+      return
     end
-  }), 15000)
+    if is_blocked_by_me then
+      showToast("Please unblock this user from More Options first.")
+      return
+    end
+    if notifyServerDownIfNeeded() then return end
+
+    local text = trim(msg_input.getText())
+    if text == "" then return end
+
+    local payload = {
+      sender = current_username,
+      receiver = target_user,
+      msg_type = "text",
+      text = text,
+      status = "Sent",
+      timestamp = os.date("%I:%M %p"),
+      timestamp_raw = os.date("%Y%m%d%H%M%S")
+    }
+
+    if active_reply_target ~= nil then
+      payload.reply_to = active_reply_target
+      active_reply_target = nil
+      reply_banner.setVisibility(View.GONE)
+    end
+
+    http_post_or_put(FIREBASE_URL .. "personal_chats/" .. room_key .. ".json", "POST", payload, function(success)
+      if success then
+        playSound(SOUND_SEND, nil, ToneGenerator.TONE_PROP_BEEP, false)
+        msg_input.setText("")
+        loadMessages(true)
+        scroll.post(Runnable({
+          run = function()
+            scroll.fullScroll(ScrollView.FOCUS_DOWN)
+          end
+        }))
+        triggerOfflineAssistantReplyIfNeeded(text)
+      else
+        showToast("Failed to send message.")
+      end
+    end)
+  end)
 end
+
+-- ========================================================
+-- BTP VOICE ROOM (OFFLINE CACHE, LIVE VOICE CHAT & ONLINE FIX)
+-- ========================================================
+
+function openBtpVoiceRoomDialog()
+  local layout = makeLayout(true, 10)
+
+  local initial_lock_view = public_room_locked and not canBypassRoomLock(current_username)
+  local initial_title = "BTP Voice Room"
+  if not isNetworkAvailable() then
+    initial_title = "BTP Voice Room (Offline)"
+  elseif not initial_lock_view then
+    initial_title = "BTP Voice Room (Checking online...)"
+  end
+
+  local title_tv = makeText(initial_title, 16)
+  title_tv.setTextColor(0xFF1E88E5)
+  title_tv.setPadding(4, 2, 4, 6)
+  layout.addView(title_tv)
+
+  local lock_banner = makeText("Only admin and developer can send message this room", 13)
+  lock_banner.setTextColor(0xFFD32F2F)
+  lock_banner.setPadding(6, 6, 6, 6)
+  lock_banner.setVisibility(View.GONE)
+  layout.addView(lock_banner)
+
+  local scroll = ScrollView(activity)
+  local chat_container = makeLayout(true, 8)
+  scroll.addView(chat_container)
+  layout.addView(scroll, LinearLayout.LayoutParams(-1, 330))
+
+  local reply_banner = makeLayout(false, 8)
+  reply_banner.setBackgroundColor(0xFFE0E0E0)
+  reply_banner.setVisibility(View.GONE)
+
+  local reply_text_preview = makeText("", 12)
+  reply_text_preview.setTextColor(0xFF333333)
+  reply_banner.addView(reply_text_preview, LinearLayout.LayoutParams(0, -2, 1))
+
+  local cancel_reply_btn = makeButton("Cancel Reply")
+  reply_banner.addView(cancel_reply_btn, LinearLayout.LayoutParams(-2, -2))
+  layout.addView(reply_banner)
+
+  local active_reply_target = nil
+  cancel_reply_btn.setOnClickListener(function()
+    active_reply_target = nil
+    reply_banner.setVisibility(View.GONE)
+  end)
+
+  local input_layout = makeLayout(false, 4)
+  local msg_input = EditText(activity)
+  msg_input.setHint("Message in BTP Voice Room...")
+  input_layout.addView(msg_input, LinearLayout.LayoutParams(0, -2, 1))
+
+  local send_btn = makeButton("Send")
+  input_layout.addView(send_btn, LinearLayout.LayoutParams(-2, -2))
+  layout.addView(input_layout)
+
+  local voice_section = makeLayout(true, 6)
+  voice_section.setBackgroundColor(0xFFECEFF1)
+
+  local voice_status_tv = makeText("", 12)
+  voice_status_tv.setTextColor(0xFF37474F)
+  voice_status_tv.setVisibility(View.GONE)
+  voice_section.addView(voice_status_tv)
+
+  local voice_main_btn = makeButton("Record Voice Message")
+  voice_section.addView(voice_main_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local start_voice_chat_btn = makeButton("Start Live Voice Chat")
+  start_voice_chat_btn.setContentDescription("Start Live Voice Chat")
+  voice_section.addView(start_voice_chat_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local voice_action_row = makeLayout(false, 2)
+  voice_action_row.setVisibility(View.GONE)
+  local voice_preview_btn = makeButton("Preview")
+  local voice_send_preview_btn = makeButton("Send Voice")
+  local voice_discard_btn = makeButton("Discard")
+
+  voice_action_row.addView(voice_preview_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_action_row.addView(voice_send_preview_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_action_row.addView(voice_discard_btn, LinearLayout.LayoutParams(0, -2, 1))
+  voice_section.addView(voice_action_row)
+  layout.addView(voice_section)
+
+  local go_back_btn = makeButton("Go Back")
+  layout.addView(go_back_btn, LinearLayout.LayoutParams(-1, -2))
+
+  local dialog = AlertDialog.Builder(activity)
+    .setTitle(initial_title)
+    .setView(layout)
+    .setCancelable(true)
+    .create()
+  dialog.show()
+
+  local is_room_active = true
+  local is_initial_load = true
+  local room_open_time = os.date("%Y%m%d%H%M%S")
+  local seen_ids = {}
+  local last_hash = ""
+  local live_handler = Handler(Looper.getMainLooper())
+  local live_runnable = nil
+
+  local voice_state = "idle"
+  local media_recorder = nil
+  local preview_player = nil
+  local recorded_file_path = tostring(activity.getCacheDir().getAbsolutePath()) .. "/btp_room_rec.m4a"
+  local record_seconds = 0
+  local record_timer_handler = Handler(Looper.getMainLooper())
+  local record_timer_runnable = nil
+
+  local function stopPreviewPlayer()
+    if preview_player ~= nil then
+      pcall(function()
+        if preview_player.isPlaying() then preview_player.stop() end
+        preview_player.release()
+      end)
+      preview_player = nil
+    end
+    voice_preview_btn.setText("Preview")
+  end
+
+  local function resetVoiceUI()
+    voice_state = "idle"
+    record_seconds = 0
+    if record_timer_runnable then
+      pcall(function() record_timer_handler.removeCallbacks(record_timer_runnable) end)
+      record_timer_runnable = nil
+    end
+    if media_recorder ~= nil then
+      pcall(function()
+        media_recorder.stop()
+        media_recorder.release()
+      end)
+      media_recorder = nil
+    end
+    stopPreviewPlayer()
+    voice_main_btn.setText("Record Voice Message")
+    voice_main_btn.setVisibility(View.VISIBLE)
+    voice_action_row.setVisibility(View.GONE)
+    voice_status_tv.setVisibility(View.GONE)
+  end
+
+  local function closeRoom()
+    is_room_active = false
+    resetVoiceUI()
+    stopActiveVoicePlayer(false)
+    current_voice_playlist = {}
+    if live_handler and live_runnable then
+      pcall(function() live_handler.removeCallbacks(live_runnable) end)
+      live_runnable = nil
+    end
+  end
+
+  go_back_btn.setOnClickListener(function()
+    closeRoom()
+    dialog.dismiss()
+  end)
+
+  dialog.setOnDismissListener(DialogInterface.OnDismissListener{ onDismiss = closeRoom })
+  dialog.setOnCancelListener(DialogInterface.OnCancelListener{ onCancel = closeRoom })
+
+  start_voice_chat_btn.setOnClickListener(function()
+    if notifyServerDownIfNeeded() then return end
+    if public_room_locked and not canBypassRoomLock(current_username) then
+      showToast("Only admin and developer can send message this room")
+      return
+    end
+    closeRoom()
+    dialog.dismiss()
+    initiateVoiceCall("room_live", "btp_voice_room", "BTP Voice Room Live", {})
+  end)
+
+  local function applyRoomLockAndOnlineState()
+    if not is_room_active then return end
+    if not isNetworkAvailable() then
+      title_tv.setText("BTP Voice Room (Offline)")
+      dialog.setTitle("BTP Voice Room (Offline)")
+      return
+    end
+
+    local bypass_lock = canBypassRoomLock(current_username)
+    local lock_enforced_for_me = (public_room_locked and not bypass_lock)
+
+    if lock_enforced_for_me then
+      lock_banner.setText("Only admin and developer can send message this room")
+      lock_banner.setVisibility(View.VISIBLE)
+      input_layout.setVisibility(View.GONE)
+      voice_section.setVisibility(View.GONE)
+      reply_banner.setVisibility(View.GONE)
+      title_tv.setText("BTP Voice Room")
+      dialog.setTitle("BTP Voice Room")
+      return
+    else
+      input_layout.setVisibility(View.VISIBLE)
+      voice_section.setVisibility(View.VISIBLE)
+      if public_room_locked then
+        lock_banner.setText("Room Locked for Members (Only admin and developer can send message this room)")
+        lock_banner.setVisibility(View.VISIBLE)
+      else
+        lock_banner.setVisibility(View.GONE)
+      end
+    end
+
+    http_get(FIREBASE_URL .. "user_presence.json", function(s, r)
+      if not is_room_active or public_room_locked then return end
+      if not isNetworkAvailable() then
+        title_tv.setText("BTP Voice Room (Offline)")
+        dialog.setTitle("BTP Voice Room (Offline)")
+        return
+      end
+      local count = getOnlineUsersSummary(s and r or nil)
+      local combined_title = (count > 0) and ("BTP Voice Room (" .. tostring(count) .. " online)") or "BTP Voice Room (Offline)"
+      title_tv.setText(combined_title)
+      dialog.setTitle(combined_title)
+    end)
+  end
+
+  local function renderRoomMessagesFromRaw(raw_json_str, force_refresh, from_network)
+    local msg_list = {}
+    local hash_builder = {}
+
+    if raw_json_str and raw_json_str ~= "null" then
+      local ok, data = pcall(cjson.decode, raw_json_str)
+      if ok and type(data) == "table" then
+        for k, v in pairs(data) do
+          if type(v) == "table" then
+            v.id = k
+            table.insert(msg_list, v)
+            if from_network then
+              markMessageSeenInFirebase(FIREBASE_URL .. "btp_voice_room/" .. tostring(k))
+            end
+          end
+        end
+      end
+    end
+
+    table.sort(msg_list, function(a, b)
+      return tostring(a.timestamp_raw or a.timestamp or "") < tostring(b.timestamp_raw or b.timestamp or "")
+    end)
+
+    if #msg_list > 0 then
+      local latest_item = msg_list[#msg_list]
+      sp.edit().putString("last_seen_vr_msg_id", tostring(latest_item.id or "")).apply()
+    end
+
+    local new_rx_on_mine = false
+    for _, m in ipairs(msg_list) do
+      local r_pairs = {}
+      if type(m.reactions) == "table" then
+        for rk, rv in pairs(m.reactions) do
+          table.insert(r_pairs, tostring(rk) .. "=" .. tostring(rv))
+          local rx_unique = "vr_" .. tostring(m.id) .. "_" .. tostring(rk) .. "_" .. tostring(rv)
+          if trim(tostring(m.sender or "")):lower() == trim(current_username):lower() and trim(Uri.decode(tostring(rk))):lower() ~= trim(current_username):lower() then
+            if not is_initial_load and not known_reaction_keys[rx_unique] then
+              new_rx_on_mine = true
+            end
+          end
+          known_reaction_keys[rx_unique] = true
+        end
+      end
+      table.sort(r_pairs)
+      local seen_cnt = (type(m.seen_by) == "table") and table_size(m.seen_by) or 0
+      local played_cnt = (type(m.played_by) == "table") and table_size(m.played_by) or 0
+      local del_flag = (m.deleted_for_everyone == true or m.deleted_for_everyone == "true") and "1" or "0"
+      table.insert(hash_builder, tostring(m.id) .. ":" .. del_flag .. ":" .. tostring(seen_cnt) .. ":" .. tostring(played_cnt) .. ":" .. table.concat(r_pairs, ","))
+    end
+    local cur_hash = table.concat(hash_builder, "|")
+
+    if new_rx_on_mine and is_room_active and from_network then
+      playSound(SOUND_REACTION, nil, ToneGenerator.TONE_PROP_BEEP, false)
+    end
+
+    if cur_hash == last_hash and not is_initial_load and not force_refresh then return end
+    if active_voice_player ~= nil and not force_refresh then return end
+
+    local new_incoming = false
+    for _, m in ipairs(msg_list) do
+      if not seen_ids[m.id] then
+        seen_ids[m.id] = true
+        if from_network and not is_initial_load and trim(tostring(m.sender or "")):lower() ~= trim(current_username):lower() and tostring(m.timestamp_raw or "") > room_open_time then
+          new_incoming = true
+        end
+      end
+    end
+
+    last_hash = cur_hash
+    chat_container.removeAllViews()
+    local vr_playlist = {}
+
+    if #msg_list == 0 then
+      chat_container.addView(makeText("Welcome to BTP Voice Room. Start the conversation!", 14))
+    else
+      local last_day = ""
+      for _, msg in ipairs(msg_list) do
+        local dl = getDayLabelFromRaw(msg.timestamp_raw)
+        if dl ~= "" and dl ~= last_day then
+          last_day = dl
+          chat_container.addView(createAccessibleDayHeader(dl), LinearLayout.LayoutParams(-1, -2))
+        end
+
+        local is_me = (trim(tostring(msg.sender or "")):lower() == trim(current_username):lower())
+        local is_deleted_all = (msg.deleted_for_everyone == true or msg.deleted_for_everyone == "true")
+        local bubble = makeLayout(true, 8)
+        bubble.setBackgroundColor(is_me and 0xFFDCF8C6 or 0xFFFFFFFF)
+        bubble.setPadding(12, 10, 12, 10)
+
+        if isis
